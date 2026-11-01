@@ -2,6 +2,7 @@
 """Build the kerao FFmpeg libraries for Apple platforms.
 
 python3 kerao/build.py --output DIR --mode release|dev
+    [--device UDID --codesign-identity SHA-1 --provisioning-profile PATH]
 python3 kerao/build.py --self-test
 """
 
@@ -26,6 +27,7 @@ import artifact
 import checkout
 import codec_check
 import deps
+import device
 import ffmpeg
 import framework
 import privacy
@@ -34,6 +36,7 @@ import xcframework
 from common import (
     COUNTEREXAMPLES,
     FRAMEWORKS,
+    IOS,
     IOS_SIMULATOR,
     MACOS,
     ROOT,
@@ -155,7 +158,7 @@ def print_summary(
     print(f"\n{len(checks) - failed} of {len(checks)} checks passed")
 
 
-def build(output: Path, mode: str) -> int:
+def build(output: Path, mode: str, target: device.Target | None) -> int:
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise BuildError(f"--output {output} must be a new or empty directory")
     records = privacy.read_records()
@@ -165,6 +168,7 @@ def build(output: Path, mode: str) -> int:
     checks = [
         *checkout.preconditions(source, mode),
         runners.check_booted_simulator(simulators),
+        *device.preconditions(target, mode),
     ]
     if not all(check.ok for check in checks):
         print_summary(mode, source, None, None, checks)
@@ -217,13 +221,15 @@ def build(output: Path, mode: str) -> int:
             xcframework.check_library_identifiers(output / f"{name}.xcframework")
         )
         checks.append(xcframework.check_public_headers(output, name))
+    slice_runners = {
+        MACOS: runners.run_on_mac,
+        IOS_SIMULATOR: runners.simulator_runner(simulators[0]),
+        **({IOS: device.device_runner(target, output)} if target else {}),
+    }
     with tempfile.TemporaryDirectory(prefix="kerao-codec-check-") as tmp:
         program_checks, unverified_programs = codec_check.codec_checks(
             listed,
-            {
-                MACOS: runners.run_on_mac,
-                IOS_SIMULATOR: runners.simulator_runner(simulators[0]),
-            },
+            slice_runners,
             toolchain,
             output,
             Path(tmp),
@@ -281,6 +287,22 @@ def main() -> int:
     )
     parser.add_argument("--mode", choices=("release", "dev"))
     parser.add_argument(
+        "--device",
+        metavar="UDID",
+        help="iPhone that runs the ios-arm64 codec check; release builds need one",
+    )
+    parser.add_argument(
+        "--codesign-identity",
+        metavar="SHA-1",
+        help="identity that signs the runner app, as security find-identity -v -p codesigning prints it",
+    )
+    parser.add_argument(
+        "--provisioning-profile",
+        type=Path,
+        metavar="PATH",
+        help="development profile that provisions --device and holds the identity's certificate",
+    )
+    parser.add_argument(
         "--self-test",
         action="store_true",
         help="run every check against its counterexample",
@@ -290,8 +312,20 @@ def main() -> int:
         return self_test()
     if args.output is None or args.mode is None:
         parser.error("--output and --mode are required unless --self-test is given")
+    signing_args = (args.codesign_identity, args.provisioning_profile)
+    if args.device is not None and None in signing_args:
+        parser.error("--device needs --codesign-identity and --provisioning-profile")
+    if args.device is None and signing_args != (None, None):
+        parser.error("--codesign-identity and --provisioning-profile need --device")
     try:
-        return build(args.output.resolve(), args.mode)
+        target = (
+            device.read_target(
+                args.device, args.codesign_identity, args.provisioning_profile.resolve()
+            )
+            if args.device is not None
+            else None
+        )
+        return build(args.output.resolve(), args.mode, target)
     except BuildError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

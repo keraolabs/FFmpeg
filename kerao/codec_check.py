@@ -40,12 +40,20 @@ def load_manifest(path: Path) -> frozenset[str]:
     return frozenset(names)
 
 
-def parse_output(stdout: str) -> ProgramOutput:
-    """Read the lines the check program prefixes with PROTOCOL and ignore the rest."""
+class NoResult(Exception):
+    """The console output holds no complete result of the check program."""
+
+
+def parse_output(console: str) -> ProgramOutput:
+    """Read the lines the check program prefixes with PROTOCOL and ignore the rest.
+
+    Raises NoResult unless they hold one version line and an end line that counts
+    the decoder lines before it.
+    """
     versions: list[str] = []
     codecs: list[str] = []
     ends: list[str] = []
-    for line in stdout.splitlines():
+    for line in console.splitlines():
         prefix, _, rest = line.partition(" ")
         if prefix != PROTOCOL:
             continue
@@ -57,9 +65,9 @@ def parse_output(stdout: str) -> ProgramOutput:
         elif kind == "end":
             ends.append(value)
     if len(versions) != 1 or ends != [str(len(codecs))]:
-        raise BuildError(
-            f"the codec check program printed {len(versions)} versions, "
-            f"{len(codecs)} decoders and end {', '.join(ends) or 'never'}"
+        raise NoResult(
+            f"printed {len(versions)} versions, {len(codecs)} decoders "
+            f"and end {', '.join(ends) or 'never'}"
         )
     return ProgramOutput(
         version=versions[0], decoders=len(codecs), codecs=frozenset(codecs)
@@ -97,11 +105,18 @@ def check_version(version: str, release_tag: str | None) -> Check:
 
 
 def program_checks(
-    listed: frozenset[str], output: ProgramOutput | None, release_tag: str | None
+    listed: frozenset[str], console: str | None, release_tag: str | None
 ) -> list[Check]:
-    """output is None when the slice has no runner here."""
-    if output is None:
+    """console is what the check program printed, or None when the slice has no runner here."""
+    if console is None:
         return [Check(name, False, NOT_RUN) for name in PROGRAM_CHECKS]
+    try:
+        output = parse_output(console)
+    except NoResult as error:
+        return [
+            Check(name, False, f"no complete result: {error}")
+            for name in PROGRAM_CHECKS
+        ]
     return [check_codecs(listed, output), check_version(output.version, release_tag)]
 
 
@@ -125,7 +140,7 @@ def codec_checks(
         if run is None and release_tag is None:
             unverified += [f"{slice_.identifier} {name}" for name in PROGRAM_CHECKS]
             continue
-        program_output = None
+        console = None
         if run is not None:
             binary = compile_program(
                 slice_,
@@ -133,13 +148,10 @@ def codec_checks(
                 output,
                 work / slice_.identifier / "codec_check",
             )
-            try:
-                program_output = parse_output(run(binary))
-            except BuildError as error:
-                raise BuildError(f"{slice_.identifier}: {error}") from error
+            console = run(binary)
         checks += [
             scoped(slice_.identifier, check)
-            for check in program_checks(listed, program_output, release_tag)
+            for check in program_checks(listed, console, release_tag)
         ]
     return checks, unverified
 
@@ -185,9 +197,9 @@ def release_program_reports_n9_0_1(tmp: Path) -> tuple[Check, Check]:
 @counterexample
 def release_slice_without_a_program_run(tmp: Path) -> tuple[Check, Check]:
     listed = frozenset({"h264"})
-    output = parse_output(fake_program_output(listed, FAKE_VERSION))
+    console = fake_program_output(listed, FAKE_VERSION)
     return (
-        program_checks(listed, output, FAKE_VERSION)[0],
+        program_checks(listed, console, FAKE_VERSION)[0],
         program_checks(listed, None, FAKE_VERSION)[0],
     )
 
@@ -197,4 +209,27 @@ def dev_program_reports_n9_0_1(tmp: Path) -> tuple[Check, Check]:
     return (
         check_version(reported_version(FAKE_DEV_VERSION), None),
         check_version(reported_version("n9.0.1-6-g1976b53c6c"), None),
+    )
+
+
+def fake_device_console(program_lines: list[str]) -> str:
+    """program_lines framed the way devicectl --console prints them."""
+    lines = [
+        "Launched application with org.keraolabs.codec-check bundle identifier.",
+        "Waiting for the application to terminate…",
+        *program_lines,
+        "The app terminated with the exit code 0.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
+@counterexample
+def device_console_without_a_result_line(tmp: Path) -> tuple[Check, Check]:
+    listed = frozenset({"h264"})
+    program_lines = fake_program_output(listed, FAKE_VERSION).splitlines()
+    complete = fake_device_console(program_lines)
+    without_end = fake_device_console(program_lines[:-1])
+    return (
+        program_checks(listed, complete, FAKE_VERSION)[0],
+        program_checks(listed, without_end, FAKE_VERSION)[0],
     )
