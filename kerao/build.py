@@ -27,6 +27,7 @@ import checkout
 import deps
 import ffmpeg
 import framework
+import privacy
 import xcframework
 from common import (
     COUNTEREXAMPLES,
@@ -59,6 +60,7 @@ def build_slice(
     toolchain: Toolchain,
     bundle_version: str,
     checkouts: dict[Dep, Path],
+    records: privacy.Records,
     work: Path,
     output: Path,
 ) -> SliceBuild:
@@ -82,7 +84,9 @@ def build_slice(
     linked = framework.find_dylib(build_dir / "libavcodec", "libavcodec")
     checks += deps.linked_checks(linked)
     frameworks = work / "frameworks"
-    framework.package_slice(slice_, toolchain, bundle_version, prefix, frameworks)
+    framework.package_slice(
+        slice_, toolchain, bundle_version, prefix, records, frameworks
+    )
     return SliceBuild(
         checks=[scoped(slice_.identifier, check) for check in checks],
         configure={
@@ -147,6 +151,7 @@ def print_summary(
 def build(output: Path, mode: str) -> int:
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise BuildError(f"--output {output} must be a new or empty directory")
+    records = privacy.read_records()
     source = checkout.read_source(ROOT)
     checks = checkout.preconditions(source, mode)
     if not all(check.ok for check in checks):
@@ -170,6 +175,7 @@ def build(output: Path, mode: str) -> int:
                 toolchain,
                 bundle_version,
                 checkouts,
+                records,
                 work / slice_.identifier,
                 output,
             )
@@ -193,7 +199,7 @@ def build(output: Path, mode: str) -> int:
         copy_notices(checkouts, output / "notices")
     for slice_ in SLICES:
         for name in FRAMEWORKS:
-            checks += framework.framework_checks(output, slice_, name)
+            checks += framework.framework_checks(output, slice_, name, records)
     for name in FRAMEWORKS:
         checks.append(
             xcframework.check_library_identifiers(output / f"{name}.xcframework")

@@ -3,6 +3,7 @@ import re
 import shutil
 from pathlib import Path
 
+import privacy
 from checkout import UPSTREAM_VERSION
 from common import (
     ARCHS,
@@ -141,6 +142,7 @@ def make_framework(
     dylib: Path,
     headers: Path,
     plist: dict[str, object],
+    record: privacy.Record,
     frameworks_dir: Path,
     layout: Layout,
 ) -> Path:
@@ -152,6 +154,7 @@ def make_framework(
     shutil.copytree(headers, framework_headers(framework, layout))
     with framework_plist(framework, layout).open("wb") as file:
         plistlib.dump(plist, file)
+    privacy.write_manifest(framework, layout, record)
     if layout.contents.parts:
         current = layout.contents.parent / "Current"
         (framework / current).symlink_to(layout.contents.name)
@@ -179,6 +182,7 @@ def package_slice(
     toolchain: Toolchain,
     bundle_version: str,
     prefix: Path,
+    records: privacy.Records,
     frameworks_dir: Path,
 ) -> None:
     """Turn the installed dylibs and headers under prefix into one framework per library."""
@@ -189,6 +193,7 @@ def package_slice(
             find_dylib(prefix / "lib", name),
             prefix / "include" / name,
             info_plist(slice_, name, toolchain, bundle_version),
+            records.libraries[name],
             frameworks_dir,
             slice_.layout,
         )
@@ -220,9 +225,12 @@ def check_info_plist(framework: Path, slice_: Slice) -> Check:
     )
 
 
-def framework_checks(output: Path, slice_: Slice, name: str) -> list[Check]:
+def framework_checks(
+    output: Path, slice_: Slice, name: str, records: privacy.Records
+) -> list[Check]:
     layout = slice_.layout
     framework = delivered_framework(output, slice_, name)
+    record = records.libraries[name]
     macho = read_macho(framework_binary(framework, layout))
     checks = [
         check_build_version(macho, slice_.platform, slice_.floor),
@@ -231,6 +239,8 @@ def framework_checks(output: Path, slice_: Slice, name: str) -> list[Check]:
         check_rpath(macho, layout.rpath),
         check_dependencies(macho, bundled(layout)),
         check_info_plist(framework, slice_),
+        privacy.check_manifest(framework, layout, record),
+        privacy.check_required_reason_apis(macho.path, record, records.apple),
     ]
     return [scoped(f"{slice_.identifier} {name}", check) for check in checks]
 
@@ -246,6 +256,7 @@ def fake_frameworks(
     (prefix / "lib").mkdir(parents=True)
     dylibs: list[Path] = []
     frameworks: dict[str, Path] = {}
+    records = privacy.read_records()
     for name in ("libavutil", "libavcodec"):
         (prefix / "include" / name).mkdir(parents=True)
         (prefix / "include" / name / f"{name}.h").write_text(
@@ -276,6 +287,7 @@ def fake_frameworks(
             dylib,
             prefix / "include" / name,
             info_plist(slice_, name, FAKE_TOOLCHAIN, "1"),
+            records.libraries[name],
             tmp / "frameworks",
             slice_.layout,
         )
@@ -379,3 +391,23 @@ def info_plist_without_minimum_version(tmp: Path) -> tuple[Check, Check]:
     with framework_plist(bad, MACOS.layout).open("wb") as file:
         plistlib.dump(plist, file)
     return good, check_info_plist(bad, MACOS)
+
+
+@counterexample
+def framework_without_privacy_manifest(tmp: Path) -> tuple[Check, Check]:
+    framework = fake_frameworks(tmp)["libavutil"]
+    record = privacy.read_records().libraries["libavutil"]
+    good = privacy.check_manifest(framework, MACOS.layout, record)
+    bad = copy_framework(framework, tmp / "bad")
+    privacy.manifest_path(bad, MACOS.layout).unlink()
+    return good, privacy.check_manifest(bad, MACOS.layout, record)
+
+
+@counterexample
+def privacy_manifest_without_a_recorded_api_type(tmp: Path) -> tuple[Check, Check]:
+    framework = fake_frameworks(tmp)["libavutil"]
+    record = privacy.read_records().libraries["libavutil"]
+    good = privacy.check_manifest(framework, MACOS.layout, record)
+    bad = copy_framework(framework, tmp / "bad")
+    privacy.write_manifest(bad, MACOS.layout, record[1:])
+    return good, privacy.check_manifest(bad, MACOS.layout, record)

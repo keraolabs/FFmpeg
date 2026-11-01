@@ -2,6 +2,7 @@ import plistlib
 import shutil
 from pathlib import Path
 
+import privacy
 from common import (
     FRAMEWORKS,
     IOS,
@@ -121,11 +122,12 @@ def named(checks: list[Check], name: str) -> Check:
 @counterexample
 def ios_slice_with_macos_rpath(tmp: Path) -> tuple[Check, Check]:
     output = fake_output(tmp)
-    good = named(framework_checks(output, IOS, "libavutil"), "rpath")
+    records = privacy.read_records()
+    good = named(framework_checks(output, IOS, "libavutil", records), "rpath")
     bad = copy_output(output, tmp / "bad")
     binary = framework_binary(delivered_framework(bad, IOS, "libavutil"), IOS.layout)
     capture(["xcrun", "install_name_tool", "-add_rpath", VERSIONED.rpath, str(binary)])
-    return good, named(framework_checks(bad, IOS, "libavutil"), "rpath")
+    return good, named(framework_checks(bad, IOS, "libavutil", records), "rpath")
 
 
 @counterexample

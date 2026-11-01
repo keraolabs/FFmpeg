@@ -55,6 +55,12 @@ Each xcframework has three slices, built for iOS 17.0, the iOS 17.0 Simulator an
 
 The public headers are byte-identical across the three slices, and `include/` is a copy of them.
 
+## Privacy manifests
+
+Every framework carries a `PrivacyInfo.xcprivacy`: at the top level on iOS, in `Versions/A/Resources/` on macOS. It declares no tracking, no tracking domains and no collected data, and its `NSPrivacyAccessedAPITypes` come from `kerao/required-reason-api/<lib>.json`. Each record entry gives a category, the APIs used, their purpose, the approved reason codes and why the library uses them. `apple.json` is Apple's required-reason API list, with its source pages and the date it was copied.
+
+After the build, `nm -u` and the `__objc_methname` section of every binary are matched against `apple.json`. An API that a binary uses and its record does not declare fails the build. A recorded API the scan does not see is only reported. Update `apple.json` when Apple changes the list, and the records when a library's use changes.
+
 `artifact.json` holds `libraries`, `repository`, `tag`, `commit`, `mode`, `dirty`, `built_at`, `xcode_build`, `sdks`, `tools`, `deps`, `inputs`, `frameworks`, `configure` and `unverified`. `tools` maps `meson`, `ninja`, `cmake` and `pkg-config` to their versions. Each `deps[]` entry gives a dependency's `name`, `repository`, `tag` and `commit`. Each `frameworks[].slices[]` entry gives a slice identifier, the binary's path relative to `<dir>` and its SHA-256. A `dev` build lists in `unverified` the checks it skipped.
 
 `configure/<slice>.txt` is the configure output of the current build arguments. Commit it to `kerao/configure/` whenever the `committed configure output` check fails.
