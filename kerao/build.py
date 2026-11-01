@@ -21,6 +21,7 @@ import argparse
 import dataclasses
 import shutil
 import tempfile
+import types
 from pathlib import Path
 
 import artifact
@@ -51,6 +52,8 @@ from deps import DEPS, Dep
 from toolchain import Toolchain, read_toolchain
 
 NOTICES = ("LICENSE.md", "COPYING.LGPLv2.1")
+KERAO = ROOT / "kerao"
+CHECK_PREFIX = "check_"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -267,6 +270,38 @@ def run_counterexample(case: Counterexample) -> tuple[bool, str]:
     return True, f"{bad.name}: {bad.detail}"
 
 
+def defined_checks() -> list[types.FunctionType]:
+    """Every function named check_* that a loaded module of kerao/ defines."""
+    return [
+        value
+        for module in list(sys.modules.values())
+        if getattr(module, "__file__", None)
+        and Path(module.__file__).resolve().parent == KERAO
+        for name, value in vars(module).items()
+        if name.startswith(CHECK_PREFIX)
+        and isinstance(value, types.FunctionType)
+        and value.__module__ == module.__name__
+    ]
+
+
+def referenced_names(code: types.CodeType) -> frozenset[str]:
+    nested = [const for const in code.co_consts if isinstance(const, types.CodeType)]
+    return frozenset(code.co_names).union(*map(referenced_names, nested))
+
+
+def uncovered_checks() -> tuple[int, list[str]]:
+    """The number of check functions, and those no counterexample calls."""
+    called = frozenset().union(
+        *(referenced_names(case.__code__) for case in COUNTEREXAMPLES)
+    )
+    checks = defined_checks()
+    return len(checks), sorted(
+        f"{check.__module__}.{check.__name__}"
+        for check in checks
+        if check.__name__ not in called
+    )
+
+
 def self_test() -> int:
     width = max(len(case.__name__) for case in COUNTEREXAMPLES)
     caught = 0
@@ -275,7 +310,11 @@ def self_test() -> int:
         caught += ok
         print(f"{'pass' if ok else 'FAIL'}  {case.__name__:<{width}}  {detail}")
     print(f"\n{caught} of {len(COUNTEREXAMPLES)} counterexamples caught")
-    return 0 if caught == len(COUNTEREXAMPLES) else 1
+    total, uncovered = uncovered_checks()
+    for name in uncovered:
+        print(f"FAIL  {name}  no counterexample calls it")
+    print(f"{total - len(uncovered)} of {total} checks have a counterexample")
+    return 0 if caught == len(COUNTEREXAMPLES) and not uncovered else 1
 
 
 def main() -> int:
