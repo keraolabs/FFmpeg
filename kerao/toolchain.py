@@ -9,6 +9,8 @@ from common import SLICES, BuildError, capture
 class Sdk:
     name: str
     version: str
+    build: str
+    platform_version: str
     path: Path
 
 
@@ -16,6 +18,7 @@ class Sdk:
 class Toolchain:
     xcode_version: str
     xcode_build: str
+    machine_build: str
     sdks: dict[str, Sdk]
 
 
@@ -26,6 +29,8 @@ def read_sdk(name: str) -> Sdk:
     return Sdk(
         name=name,
         version=show("version"),
+        build=show("build-version"),
+        platform_version=show("platform-version"),
         path=Path(show("path")),
     )
 
@@ -40,5 +45,22 @@ def read_toolchain() -> Toolchain:
     return Toolchain(
         xcode_version=version[1],
         xcode_build=version[2],
+        machine_build=capture(["sw_vers", "-buildVersion"]),
         sdks={slice_.identifier: read_sdk(slice_.sdk) for slice_ in SLICES},
     )
+
+
+FAKE_TOOLCHAIN = Toolchain(
+    xcode_version="27.0",
+    xcode_build="27A266a",
+    machine_build="26A434",
+    sdks={
+        "macos-arm64": Sdk(
+            name="macosx",
+            version="27.0",
+            build="26A425",
+            platform_version="27.0",
+            path=Path("/SDKs/MacOSX27.0.sdk"),
+        )
+    },
+)

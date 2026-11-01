@@ -6,17 +6,35 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 MAX_LISTED_LINES = 5
 
+PLATFORM_MACOS = 1
+
 
 @dataclasses.dataclass(frozen=True)
 class Slice:
     identifier: str
     sdk: str
     target: str
+    floor: str
+    platform: int
+    bundle_platform: str
+    minimum_version_key: str
 
 
-SLICES = (Slice("macos-arm64", "macosx", "arm64-apple-macos14.0"),)
+SLICES = (
+    Slice(
+        identifier="macos-arm64",
+        sdk="macosx",
+        target="arm64-apple-macos14.0",
+        floor="14.0",
+        platform=PLATFORM_MACOS,
+        bundle_platform="MacOSX",
+        minimum_version_key="LSMinimumSystemVersion",
+    ),
+)
 
 LIBRARIES = ("avutil", "avcodec", "avformat", "swresample")
+FRAMEWORKS = tuple(f"lib{name}" for name in LIBRARIES)
+ARCHS = ("arm64",)
 
 
 class BuildError(Exception):

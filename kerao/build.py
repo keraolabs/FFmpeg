@@ -17,16 +17,18 @@ if sys.version_info < MIN_PYTHON:
 sys.dont_write_bytecode = True
 
 import argparse
-import re
+import dataclasses
 import shutil
 import tempfile
 from pathlib import Path
 
+import artifact
 import checkout
 import ffmpeg
+import framework
 from common import (
     COUNTEREXAMPLES,
-    LIBRARIES,
+    FRAMEWORKS,
     ROOT,
     SLICES,
     BuildError,
@@ -35,29 +37,26 @@ from common import (
     Slice,
     scoped,
 )
-from toolchain import Sdk, Toolchain, read_toolchain
+from toolchain import Toolchain, read_toolchain
+
+NOTICES = ("LICENSE.md", "COPYING.LGPLv2.1")
 
 
-def copy_dylibs(lib_dir: Path, output: Path) -> None:
-    for name in LIBRARIES:
-        found = [
-            path
-            for path in lib_dir.iterdir()
-            if re.fullmatch(rf"lib{name}\.[0-9]+\.dylib", path.name)
-        ]
-        if len(found) != 1:
-            raise BuildError(
-                f"expected one lib{name}.<major>.dylib in {lib_dir}, found {len(found)}"
-            )
-        shutil.copy(found[0], output / found[0].name)
+@dataclasses.dataclass(frozen=True)
+class SliceBuild:
+    checks: list[Check]
+    configure: dict[str, object]
+    prefix: Path
+    frameworks: Path
 
 
-def build_slice(slice_: Slice, sdk: Sdk, work: Path, output: Path) -> list[Check]:
+def build_slice(
+    slice_: Slice, toolchain: Toolchain, bundle_version: str, work: Path, output: Path
+) -> SliceBuild:
     build_dir = work / "build"
     build_dir.mkdir(parents=True)
-    configure_output = ffmpeg.run_configure(
-        slice_, ffmpeg.configure_args(slice_, sdk.path), build_dir
-    )
+    args = ffmpeg.configure_args(slice_, toolchain.sdks[slice_.identifier].path)
+    configure_output = ffmpeg.run_configure(slice_, args, build_dir)
     written = output / "configure" / f"{slice_.identifier}.txt"
     written.parent.mkdir(exist_ok=True)
     written.write_text(configure_output)
@@ -68,8 +67,23 @@ def build_slice(slice_: Slice, sdk: Sdk, work: Path, output: Path) -> list[Check
         ),
     ]
     prefix = ffmpeg.run_make(slice_, build_dir, work / "stage")
-    copy_dylibs(prefix / "lib", output)
-    return [scoped(slice_.identifier, check) for check in checks]
+    frameworks = work / "frameworks"
+    framework.package_slice(slice_, toolchain, bundle_version, prefix, frameworks)
+    return SliceBuild(
+        checks=[scoped(slice_.identifier, check) for check in checks],
+        configure={
+            "args": args,
+            "license": "; ".join(ffmpeg.license_lines(configure_output)),
+        },
+        prefix=prefix,
+        frameworks=frameworks,
+    )
+
+
+def copy_notices(notices: Path) -> None:
+    notices.mkdir(parents=True)
+    for name in NOTICES:
+        shutil.copy(ROOT / name, notices / name)
 
 
 def print_summary(
@@ -116,14 +130,39 @@ def build(output: Path, mode: str) -> int:
         return 1
     toolchain = read_toolchain()
     output.mkdir(parents=True, exist_ok=True)
+    bundle_version = checkout.bundle_version(source)
     with tempfile.TemporaryDirectory(prefix="kerao-ffmpeg-") as work:
-        for slice_ in SLICES:
-            checks += build_slice(
+        builds = {
+            slice_: build_slice(
                 slice_,
-                toolchain.sdks[slice_.identifier],
+                toolchain,
+                bundle_version,
                 Path(work) / slice_.identifier,
                 output,
             )
+            for slice_ in SLICES
+        }
+        for slice_build in builds.values():
+            checks += slice_build.checks
+        shutil.copytree(builds[SLICES[0]].prefix / "include", output / "include")
+        framework.make_xcframeworks(
+            {slice_: slice_build.frameworks for slice_, slice_build in builds.items()},
+            output,
+        )
+    for slice_ in SLICES:
+        for name in FRAMEWORKS:
+            checks += framework.framework_checks(output, slice_, name)
+    copy_notices(output / "notices" / "ffmpeg")
+    record = artifact.artifact_record(
+        mode,
+        source,
+        toolchain,
+        {slice_.identifier: built.configure for slice_, built in builds.items()},
+        artifact.framework_records(output, SLICES),
+    )
+    artifact_path = output / "artifact.json"
+    artifact.write_artifact(artifact_path, record)
+    checks.append(artifact.check_artifact_fields(artifact_path))
     print_summary(mode, source, toolchain, output, checks)
     return 0 if all(check.ok for check in checks) else 1
 

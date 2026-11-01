@@ -7,9 +7,10 @@ from common import MAX_LISTED_LINES, Check, capture, counterexample
 
 UPSTREAM_TAG = "n9.0.2"
 UPSTREAM_VERSION = UPSTREAM_TAG.removeprefix("n")
-RELEASE_TAG = re.compile(rf"{re.escape(UPSTREAM_TAG)}-kerao\.[1-9][0-9]*")
+RELEASE_TAG = re.compile(rf"{re.escape(UPSTREAM_TAG)}-kerao\.([1-9][0-9]*)")
 RELEASE_TAG_CHECK = "release tag"
 CLEAN_WORKTREE_CHECK = "clean worktree"
+DEV_BUNDLE_VERSION = "0"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -59,6 +60,16 @@ def release_tag(source: Source) -> str | None:
     return tags[0] if len(tags) == 1 else None
 
 
+def bundle_version(source: Source) -> str:
+    tag = release_tag(source)
+    return RELEASE_TAG.fullmatch(tag)[1] if tag else DEV_BUNDLE_VERSION
+
+
+def artifact_tag(source: Source, mode: str) -> str:
+    tag = release_tag(source) if mode == "release" else None
+    return tag or source.version
+
+
 def check_release_tag(source: Source) -> Check:
     tag = release_tag(source)
     if tag is None:
@@ -103,6 +114,10 @@ def preconditions(source: Source, mode: str) -> list[Check]:
     if mode == "release":
         checks += [check_release_tag(source), check_clean_worktree(source)]
     return checks
+
+
+def skipped_checks(mode: str) -> list[str]:
+    return [] if mode == "release" else [RELEASE_TAG_CHECK, CLEAN_WORKTREE_CHECK]
 
 
 FAKE_GIT_ENV = {
