@@ -1,10 +1,12 @@
 import dataclasses
 import json
+import shutil
 from collections.abc import Callable
 from pathlib import Path
 
 from checkout import UPSTREAM_TAG
 from common import (
+    FRAMEWORKS,
     IOS,
     MACOS,
     ROOT,
@@ -12,10 +14,12 @@ from common import (
     BuildError,
     Check,
     Slice,
+    capture,
     counterexample,
     scoped,
 )
-from runners import Runner, compile_program
+from framework import delivered_framework
+from runners import Runner, compile_program, run_on_mac
 from toolchain import Toolchain
 
 MANIFEST = ROOT / "kerao" / "codecs.json"
@@ -304,3 +308,56 @@ def device_launch_fails_on_first_slice(tmp: Path) -> tuple[Check, Check]:
         by_name(checks, f"{MACOS.identifier} {VERSION_CHECK}"),
         by_name(checks, f"{IOS.identifier} {CODECS_CHECK}"),
     )
+
+
+FAKE_PROGRAM = """\
+#include <stdio.h>
+int main(void) {{ return fputs({console}, stdout) < 0; }}
+"""
+
+
+def fake_program(path: Path, console: str) -> Path:
+    """C source of a program that prints console."""
+    path.write_text(FAKE_PROGRAM.format(console=json.dumps(console)))
+    return path
+
+
+def fake_delivered_frameworks(output: Path, slice_: Slice, work: Path) -> None:
+    """An empty framework of every library, delivered for slice_ under output."""
+    source = work / "empty.c"
+    source.write_text("")
+    for name in FRAMEWORKS:
+        framework = delivered_framework(output, slice_, name)
+        framework.mkdir(parents=True)
+        capture(
+            [
+                *("xcrun", "--sdk", slice_.sdk, "clang", "-dynamiclib"),
+                *("-target", slice_.target),
+                *("-install_name", f"@rpath/{name}.framework/{name}"),
+                *("-o", str(framework / name), str(source)),
+            ]
+        )
+
+
+@counterexample
+def output_path_with_a_comma(tmp: Path) -> tuple[Check, Check]:
+    listed = frozenset({"h264"})
+    program = fake_program(
+        tmp / "program.c", fake_program_output(listed, FAKE_DEV_VERSION)
+    )
+    sdk_path = Path(capture(["xcrun", "--sdk", MACOS.sdk, "--show-sdk-path"]))
+    good = tmp / "good,output"
+    fake_delivered_frameworks(good, MACOS, tmp)
+    bad = tmp / "bad,output"
+    shutil.copytree(good, bad)
+    shutil.rmtree(delivered_framework(bad, MACOS, FRAMEWORKS[-1]))
+
+    def codecs(output: Path) -> Check:
+        def compile_slice(slice_: Slice) -> Path:
+            binary = tmp / "programs" / output.name / "codec_check"
+            return compile_program(slice_, sdk_path, output, program, binary)
+
+        checks, _ = codec_checks(listed, {MACOS: run_on_mac}, compile_slice, None)
+        return by_name(checks, f"{MACOS.identifier} {CODECS_CHECK}")
+
+    return codecs(good), codecs(bad)

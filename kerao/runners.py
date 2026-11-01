@@ -38,7 +38,11 @@ def compile_program(
             *("-target", slice_.target, "-isysroot", str(sdk_path)),
             *(arg for directory in slice_dirs for arg in ("-F", directory)),
             *(arg for name in FRAMEWORKS for arg in ("-framework", name)),
-            *(f"-Wl,-rpath,{directory}" for directory in slice_dirs),
+            *(
+                arg
+                for directory in slice_dirs
+                for arg in ("-Xlinker", "-rpath", "-Xlinker", directory)
+            ),
             *("-o", str(binary), str(source)),
         ]
     )
