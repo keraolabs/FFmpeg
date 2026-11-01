@@ -10,6 +10,23 @@ python3 kerao/build.py --self-test
 
 `release` builds only a clean checkout whose HEAD is an annotated `n9.0.2-kerao.<n>` tag. `dev` builds any checkout.
 
+## Prerequisites
+
+- Xcode, with the iOS, iOS Simulator and macOS SDKs, and Python 3.11 or newer.
+- `meson`, `ninja`, `cmake` and `pkg-config` from Homebrew: `brew install meson ninja cmake pkgconf`. Their versions are not pinned; `artifact.json` records the ones used.
+- Network access to the two upstream repositories below.
+
+## Dependencies
+
+`libavcodec` links these statically. Each build clones them into a temporary directory and stops if the checked-out commit differs from the pin in `kerao/deps.py`.
+
+| Library | Repository | Tag | Commit |
+| --- | --- | --- | --- |
+| dav1d | `https://code.videolan.org/videolan/dav1d.git` | `1.5.4` | `54706fc6bc0cdecab7e9593974a4039cc038fca7` |
+| libuavs3d | `https://github.com/uavs3/uavs3d.git` | `1.2` | `0e20d2c291853f196c68922a264bcd8471d75b68` |
+
+dav1d is built with meson and libuavs3d with CMake, as static libraries for the same target and SDK as FFmpeg. libuavs3d is built with `COMPILE_10BIT=1`, so it decodes 8-bit and 10-bit AVS3. FFmpeg also links the SDK's zlib and bzlib.
+
 ## Output
 
 ```
@@ -24,6 +41,8 @@ python3 kerao/build.py --self-test
   artifact.json
   notices/ffmpeg/LICENSE.md
   notices/ffmpeg/COPYING.LGPLv2.1
+  notices/dav1d/COPYING
+  notices/libuavs3d/COPYING
   configure/<slice>.txt
 ```
 
@@ -36,6 +55,6 @@ Each xcframework has three slices, built for iOS 17.0, the iOS 17.0 Simulator an
 
 The public headers are byte-identical across the three slices, and `include/` is a copy of them.
 
-`artifact.json` holds `libraries`, `repository`, `tag`, `commit`, `mode`, `dirty`, `built_at`, `xcode_build`, `sdks`, `tools`, `deps`, `inputs`, `frameworks`, `configure` and `unverified`. Each `frameworks[].slices[]` entry gives a slice identifier, the binary's path relative to `<dir>` and its SHA-256. A `dev` build lists in `unverified` the checks it skipped.
+`artifact.json` holds `libraries`, `repository`, `tag`, `commit`, `mode`, `dirty`, `built_at`, `xcode_build`, `sdks`, `tools`, `deps`, `inputs`, `frameworks`, `configure` and `unverified`. `tools` maps `meson`, `ninja`, `cmake` and `pkg-config` to their versions. Each `deps[]` entry gives a dependency's `name`, `repository`, `tag` and `commit`. Each `frameworks[].slices[]` entry gives a slice identifier, the binary's path relative to `<dir>` and its SHA-256. A `dev` build lists in `unverified` the checks it skipped.
 
 `configure/<slice>.txt` is the configure output of the current build arguments. Commit it to `kerao/configure/` whenever the `committed configure output` check fails.

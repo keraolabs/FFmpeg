@@ -24,6 +24,7 @@ from pathlib import Path
 
 import artifact
 import checkout
+import deps
 import ffmpeg
 import framework
 import xcframework
@@ -38,6 +39,7 @@ from common import (
     Slice,
     scoped,
 )
+from deps import DEPS, Dep
 from toolchain import Toolchain, read_toolchain
 
 NOTICES = ("LICENSE.md", "COPYING.LGPLv2.1")
@@ -53,22 +55,32 @@ class SliceBuild:
 
 
 def build_slice(
-    slice_: Slice, toolchain: Toolchain, bundle_version: str, work: Path, output: Path
+    slice_: Slice,
+    toolchain: Toolchain,
+    bundle_version: str,
+    checkouts: dict[Dep, Path],
+    work: Path,
+    output: Path,
 ) -> SliceBuild:
+    sdk_path = toolchain.sdks[slice_.identifier].path
+    pkgconfig, checks = deps.build_deps(slice_, sdk_path, checkouts, work / "deps")
     build_dir = work / "build"
     build_dir.mkdir(parents=True)
-    args = ffmpeg.configure_args(slice_, toolchain.sdks[slice_.identifier].path)
-    configure_output = ffmpeg.run_configure(slice_, args, build_dir)
+    args = ffmpeg.configure_args(slice_, sdk_path)
+    configure_output = ffmpeg.run_configure(slice_, args, build_dir, pkgconfig)
     written = output / "configure" / f"{slice_.identifier}.txt"
     written.parent.mkdir(exist_ok=True)
     written.write_text(configure_output)
-    checks = [
+    checks += [
         ffmpeg.check_license(configure_output),
+        ffmpeg.check_external_libraries(configure_output),
         ffmpeg.check_configure_output_committed(
             configure_output, ffmpeg.COMMITTED_CONFIGURE / written.name
         ),
     ]
     prefix = ffmpeg.run_make(slice_, build_dir, work / "stage")
+    linked = framework.find_dylib(build_dir / "libavcodec", "libavcodec")
+    checks += deps.linked_checks(linked)
     frameworks = work / "frameworks"
     framework.package_slice(slice_, toolchain, bundle_version, prefix, frameworks)
     return SliceBuild(
@@ -83,10 +95,11 @@ def build_slice(
     )
 
 
-def copy_notices(notices: Path) -> None:
-    notices.mkdir(parents=True)
+def copy_notices(checkouts: dict[Dep, Path], notices: Path) -> None:
+    (notices / "ffmpeg").mkdir(parents=True)
     for name in NOTICES:
-        shutil.copy(ROOT / name, notices / name)
+        shutil.copy(ROOT / name, notices / "ffmpeg" / name)
+    deps.copy_notices(checkouts, notices)
 
 
 def print_summary(
@@ -108,6 +121,15 @@ def print_summary(
             (f"sdk {key}", f"{sdk.name} {sdk.version}")
             for key, sdk in toolchain.sdks.items()
         ]
+        facts.append(
+            (
+                "tools",
+                ", ".join(
+                    f"{name} {version}" for name, version in toolchain.tools.items()
+                ),
+            )
+        )
+    facts += [(dep.name, f"{dep.tag} {dep.commit}") for dep in DEPS]
     if output is not None:
         facts.append(("output", str(output)))
     width = max(len(label) for label, _ in facts)
@@ -132,15 +154,23 @@ def build(output: Path, mode: str) -> int:
         print("not built: preconditions failed")
         return 1
     toolchain = read_toolchain()
-    output.mkdir(parents=True, exist_ok=True)
     bundle_version = checkout.bundle_version(source)
-    with tempfile.TemporaryDirectory(prefix="kerao-ffmpeg-") as work:
+    with tempfile.TemporaryDirectory(prefix="kerao-ffmpeg-") as tmp:
+        work = Path(tmp)
+        checkouts = {dep: deps.fetch(dep, work / "src" / dep.name) for dep in DEPS}
+        checks += [deps.check_commit(dep, path) for dep, path in checkouts.items()]
+        if not all(check.ok for check in checks):
+            print_summary(mode, source, toolchain, None, checks)
+            print("not built: a dependency is not at its pinned commit")
+            return 1
+        output.mkdir(parents=True, exist_ok=True)
         builds = {
             slice_: build_slice(
                 slice_,
                 toolchain,
                 bundle_version,
-                Path(work) / slice_.identifier,
+                checkouts,
+                work / slice_.identifier,
                 output,
             )
             for slice_ in SLICES
@@ -160,6 +190,7 @@ def build(output: Path, mode: str) -> int:
             {slice_: slice_build.frameworks for slice_, slice_build in builds.items()},
             output,
         )
+        copy_notices(checkouts, output / "notices")
     for slice_ in SLICES:
         for name in FRAMEWORKS:
             checks += framework.framework_checks(output, slice_, name)
@@ -168,7 +199,6 @@ def build(output: Path, mode: str) -> int:
             xcframework.check_library_identifiers(output / f"{name}.xcframework")
         )
         checks.append(xcframework.check_public_headers(output, name))
-    copy_notices(output / "notices" / "ffmpeg")
     record = artifact.artifact_record(
         mode,
         source,
@@ -180,6 +210,7 @@ def build(output: Path, mode: str) -> int:
     artifact.write_artifact(artifact_path, record)
     checks.append(artifact.check_artifact_fields(artifact_path))
     checks.append(artifact.check_artifact_slices(artifact_path))
+    checks.append(artifact.check_artifact_deps(artifact_path))
     print_summary(mode, source, toolchain, output, checks)
     return 0 if all(check.ok for check in checks) else 1
 

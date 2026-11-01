@@ -1,5 +1,7 @@
 import dataclasses
+import os
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -106,12 +108,41 @@ def scoped(scope: str, check: Check) -> Check:
 def capture(
     command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None
 ) -> str:
-    result = subprocess.run(
-        command, check=False, cwd=cwd, env=env, capture_output=True, text=True
-    )
+    try:
+        result = subprocess.run(
+            command, check=False, cwd=cwd, env=env, capture_output=True, text=True
+        )
+    except FileNotFoundError as error:
+        raise BuildError(f"{command[0]} not found") from error
     if result.returncode != 0:
         raise BuildError(f"{' '.join(command)} failed: {result.stderr.strip()}")
     return result.stdout.strip()
+
+
+def stream(
+    command: list[str],
+    what: str,
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+) -> None:
+    """Run command with its output on stderr; raise BuildError naming what if it fails."""
+    try:
+        result = subprocess.run(
+            command, check=False, cwd=cwd, env=env, stdout=sys.stderr
+        )
+    except FileNotFoundError as error:
+        raise BuildError(f"{command[0]} not found") from error
+    if result.returncode != 0:
+        raise BuildError(f"{what} failed")
+
+
+def build_env() -> dict[str, str]:
+    """The environment without FFmpeg's revision override or any pkg-config setting."""
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if key != "revision" and not key.startswith("PKG_CONFIG_")
+    }
 
 
 Counterexample = Callable[[Path], tuple[Check, Check]]

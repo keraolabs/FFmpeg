@@ -6,10 +6,12 @@ from pathlib import Path
 import checkout
 import ffmpeg
 from common import FRAMEWORKS, MAX_LISTED_LINES, SLICES, Check, Slice, counterexample
+from deps import DEPS
 from framework import delivered_framework, framework_binary
-from toolchain import FAKE_TOOLCHAIN, Toolchain
+from toolchain import FAKE_TOOLCHAIN, TOOLS, Toolchain
 
 REPOSITORY = "https://github.com/keraolabs/FFmpeg"
+DEP_FIELDS = ("name", "repository", "tag", "commit")
 ARTIFACT_FIELDS = (
     "libraries",
     "repository",
@@ -82,8 +84,8 @@ def artifact_record(
             identifier: {"name": sdk.name, "version": sdk.version}
             for identifier, sdk in toolchain.sdks.items()
         },
-        "tools": {},
-        "deps": [],
+        "tools": toolchain.tools,
+        "deps": [{field: getattr(dep, field) for field in DEP_FIELDS} for dep in DEPS],
         "inputs": [],
         "frameworks": frameworks,
         "configure": configure,
@@ -138,6 +140,33 @@ def check_artifact_slices(path: Path) -> Check:
         not problems,
         "; ".join(problems[:MAX_LISTED_LINES])
         or f"{len(sdks)} sdks, {len(frameworks)} frameworks with {', '.join(expected)}",
+    )
+
+
+def check_artifact_deps(path: Path) -> Check:
+    record = json.loads(path.read_text())
+    entries = record.get("deps", [])
+    names = [entry.get("name") for entry in entries]
+    expected = [dep.name for dep in DEPS]
+    problems = [] if names == expected else [f"deps: {', '.join(map(str, names))}"]
+    problems += [
+        f"deps {entry.get('name')} has no {field}"
+        for entry in entries
+        for field in DEP_FIELDS
+        if not entry.get(field)
+    ]
+    tools = record.get("tools", {})
+    problems += [f"tools has no {name}" for name in TOOLS if not tools.get(name)]
+    return Check(
+        "artifact.json deps and tools",
+        not problems,
+        "; ".join(problems[:MAX_LISTED_LINES])
+        or ", ".join(
+            [
+                *(f"{entry['name']} {entry['tag']}" for entry in entries),
+                *(f"{name} {tools[name]}" for name in TOOLS),
+            ]
+        ),
     )
 
 
@@ -197,3 +226,23 @@ def artifact_framework_without_a_slice(tmp: Path) -> tuple[Check, Check]:
         },
     )
     return check_artifact_slices(good), check_artifact_slices(bad)
+
+
+@counterexample
+def artifact_dep_without_commit(tmp: Path) -> tuple[Check, Check]:
+    record = fake_artifact_record(tmp)
+    good = tmp / "good.json"
+    write_artifact(good, record)
+    first, *rest = record["deps"]
+    bad = tmp / "bad.json"
+    write_artifact(
+        bad,
+        {
+            **record,
+            "deps": [
+                {key: value for key, value in first.items() if key != "commit"},
+                *rest,
+            ],
+        },
+    )
+    return check_artifact_deps(good), check_artifact_deps(bad)
