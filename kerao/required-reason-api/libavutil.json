@@ -1,0 +1,11 @@
+{
+  "accessed_api_types": [
+    {
+      "category": "NSPrivacyAccessedAPICategoryFileTimestamp",
+      "apis": ["fstat"],
+      "purpose": "av_file_map() calls fstat() on the file it has just opened to read its size, then maps that many bytes and returns the buffer and size to its caller.",
+      "reasons": ["0A2A.1"],
+      "rationale": "av_file_map() in libavutil/file.c is public API that maps a file the app names, it is the only code in libavutil that calls fstat(), and nothing in libavutil, libavcodec, libavformat or libswresample calls av_file_map() for its own purposes."
+    }
+  ]
+}
