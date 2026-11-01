@@ -26,7 +26,7 @@ python3 kerao/build.py --self-test
 | dav1d | `https://code.videolan.org/videolan/dav1d.git` | `1.5.4` | `54706fc6bc0cdecab7e9593974a4039cc038fca7` |
 | libuavs3d | `https://github.com/uavs3/uavs3d.git` | `1.2` | `0e20d2c291853f196c68922a264bcd8471d75b68` |
 
-dav1d is built with meson and libuavs3d with CMake, as static libraries for the same target and SDK as FFmpeg. libuavs3d is built with `COMPILE_10BIT=1`, so it decodes 8-bit and 10-bit AVS3. FFmpeg also links the SDK's zlib and bzlib.
+dav1d is built with meson and libuavs3d with CMake, as static libraries for the same target and SDK as FFmpeg. libuavs3d is built with `COMPILE_10BIT=1`, so it decodes 8-bit and 10-bit AVS3. FFmpeg also links the SDK's zlib.
 
 ## Output
 
