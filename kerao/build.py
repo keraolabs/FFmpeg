@@ -233,9 +233,7 @@ def build(output: Path, mode: str, target: device.Target | None) -> int:
         program_checks, unverified_programs = codec_check.codec_checks(
             listed,
             slice_runners,
-            toolchain,
-            output,
-            Path(tmp),
+            codec_check.program_compiler(toolchain, output, Path(tmp)),
             checkout.release_tag(source) if mode == "release" else None,
         )
     checks += program_checks

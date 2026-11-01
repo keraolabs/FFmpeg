@@ -1,18 +1,31 @@
 import dataclasses
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from checkout import UPSTREAM_TAG
-from common import ROOT, SLICES, BuildError, Check, Slice, counterexample, scoped
+from common import (
+    IOS,
+    MACOS,
+    ROOT,
+    SLICES,
+    BuildError,
+    Check,
+    Slice,
+    counterexample,
+    scoped,
+)
 from runners import Runner, compile_program
 from toolchain import Toolchain
 
 MANIFEST = ROOT / "kerao" / "codecs.json"
+CHECK_PROGRAM = ROOT / "kerao" / "codec_check.c"
 PROTOCOL = "kerao-codec-check"
 CODECS_CHECK = "codecs"
 VERSION_CHECK = "av_version_info"
 PROGRAM_CHECKS = (CODECS_CHECK, VERSION_CHECK)
 NOT_RUN = "not run: this slice has no runner"
+NO_RESULT = "no complete result"
 
 
 @dataclasses.dataclass(frozen=True)
@@ -109,29 +122,48 @@ def program_checks(
 ) -> list[Check]:
     """console is what the check program printed, or None when the slice has no runner here."""
     if console is None:
-        return [Check(name, False, NOT_RUN) for name in PROGRAM_CHECKS]
+        return failed_program_checks(NOT_RUN)
     try:
         output = parse_output(console)
     except NoResult as error:
-        return [
-            Check(name, False, f"no complete result: {error}")
-            for name in PROGRAM_CHECKS
-        ]
+        return failed_program_checks(f"{NO_RESULT}: {error}")
     return [check_codecs(listed, output), check_version(output.version, release_tag)]
+
+
+def failed_program_checks(detail: str) -> list[Check]:
+    return [Check(name, False, detail) for name in PROGRAM_CHECKS]
+
+
+Compiler = Callable[[Slice], Path]
+"""Build the check program for a slice and return the binary; raises BuildError when it cannot."""
+
+
+def program_compiler(toolchain: Toolchain, output: Path, work: Path) -> Compiler:
+    """Compile CHECK_PROGRAM against each slice's frameworks delivered under output."""
+
+    def compile_slice(slice_: Slice) -> Path:
+        return compile_program(
+            slice_,
+            toolchain.sdks[slice_.identifier].path,
+            output,
+            CHECK_PROGRAM,
+            work / slice_.identifier / "codec_check",
+        )
+
+    return compile_slice
 
 
 def codec_checks(
     listed: frozenset[str],
     slice_runners: dict[Slice, Runner],
-    toolchain: Toolchain,
-    output: Path,
-    work: Path,
+    compile_slice: Compiler,
     release_tag: str | None,
 ) -> tuple[list[Check], list[str]]:
     """Run the check program on every slice; return its checks and the unverified check names.
 
     A slice missing from slice_runners fails a release build (release_tag set) and is
-    unverified in a dev build (release_tag None).
+    unverified in a dev build (release_tag None). A slice whose program fails to
+    compile or run fails its checks; the other slices still run.
     """
     checks: list[Check] = []
     unverified: list[str] = []
@@ -140,20 +172,27 @@ def codec_checks(
         if run is None and release_tag is None:
             unverified += [f"{slice_.identifier} {name}" for name in PROGRAM_CHECKS]
             continue
-        console = None
-        if run is not None:
-            binary = compile_program(
-                slice_,
-                toolchain.sdks[slice_.identifier].path,
-                output,
-                work / slice_.identifier / "codec_check",
-            )
-            console = run(binary)
         checks += [
             scoped(slice_.identifier, check)
-            for check in program_checks(listed, console, release_tag)
+            for check in slice_checks(listed, slice_, run, compile_slice, release_tag)
         ]
     return checks, unverified
+
+
+def slice_checks(
+    listed: frozenset[str],
+    slice_: Slice,
+    run: Runner | None,
+    compile_slice: Compiler,
+    release_tag: str | None,
+) -> list[Check]:
+    if run is None:
+        return program_checks(listed, None, release_tag)
+    try:
+        console = run(compile_slice(slice_))
+    except BuildError as error:
+        return failed_program_checks(f"{NO_RESULT}: {' '.join(str(error).split())}")
+    return program_checks(listed, console, release_tag)
 
 
 def fake_program_output(codecs: frozenset[str], version: str) -> str:
@@ -232,4 +271,36 @@ def device_console_without_a_result_line(tmp: Path) -> tuple[Check, Check]:
     return (
         program_checks(listed, complete, FAKE_VERSION)[0],
         program_checks(listed, without_end, FAKE_VERSION)[0],
+    )
+
+
+def fake_compile(tmp: Path) -> Compiler:
+    return lambda slice_: tmp / slice_.identifier
+
+
+def fake_runner(console: str) -> Runner:
+    return lambda binary: console
+
+
+def launch_fails(binary: Path) -> str:
+    raise BuildError(f"devicectl could not launch {binary.name}")
+
+
+def by_name(checks: list[Check], name: str) -> Check:
+    """The check called name, or a failing one when checks hold none."""
+    return next(
+        (check for check in checks if check.name == name),
+        Check(name, False, "not among the checks"),
+    )
+
+
+@counterexample
+def device_launch_fails_on_first_slice(tmp: Path) -> tuple[Check, Check]:
+    listed = frozenset({"h264"})
+    runs = fake_runner(fake_program_output(listed, FAKE_VERSION))
+    slice_runners = {slice_: runs for slice_ in SLICES} | {IOS: launch_fails}
+    checks, _ = codec_checks(listed, slice_runners, fake_compile(tmp), FAKE_VERSION)
+    return (
+        by_name(checks, f"{MACOS.identifier} {VERSION_CHECK}"),
+        by_name(checks, f"{IOS.identifier} {CODECS_CHECK}"),
     )

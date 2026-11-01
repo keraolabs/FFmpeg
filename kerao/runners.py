@@ -6,7 +6,6 @@ from pathlib import Path
 from common import (
     FRAMEWORKS,
     IOS_SIMULATOR,
-    ROOT,
     BuildError,
     Check,
     Slice,
@@ -15,16 +14,20 @@ from common import (
 )
 from framework import delivered_framework
 
-CHECK_PROGRAM = ROOT / "kerao" / "codec_check.c"
 SIMULATOR_PLATFORM = "iOS"
 BOOTED = "Booted"
 
 Runner = Callable[[Path], str]
-"""Run a check program binary built for its slice and return its stdout."""
+"""Run a check program binary built for its slice and return its stdout.
+
+Raises BuildError when the run fails.
+"""
 
 
-def compile_program(slice_: Slice, sdk_path: Path, output: Path, binary: Path) -> Path:
-    """Link CHECK_PROGRAM against the four frameworks of slice_ delivered under output."""
+def compile_program(
+    slice_: Slice, sdk_path: Path, output: Path, source: Path, binary: Path
+) -> Path:
+    """Link source against the four frameworks of slice_ delivered under output."""
     slice_dirs = [
         str(delivered_framework(output, slice_, name).parent) for name in FRAMEWORKS
     ]
@@ -36,7 +39,7 @@ def compile_program(slice_: Slice, sdk_path: Path, output: Path, binary: Path) -
             *(arg for directory in slice_dirs for arg in ("-F", directory)),
             *(arg for name in FRAMEWORKS for arg in ("-framework", name)),
             *(f"-Wl,-rpath,{directory}" for directory in slice_dirs),
-            *("-o", str(binary), str(CHECK_PROGRAM)),
+            *("-o", str(binary), str(source)),
         ]
     )
     return binary
