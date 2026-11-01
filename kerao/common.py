@@ -106,14 +106,26 @@ def scoped(scope: str, check: Check) -> Check:
 
 
 def capture(
-    command: list[str], cwd: Path | None = None, env: dict[str, str] | None = None
+    command: list[str],
+    cwd: Path | None = None,
+    env: dict[str, str] | None = None,
+    timeout_seconds: float | None = None,
 ) -> str:
+    """command's stdout; raises BuildError when it fails or outlasts timeout_seconds."""
     try:
         result = subprocess.run(
-            command, check=False, cwd=cwd, env=env, capture_output=True, text=True
+            command,
+            check=False,
+            cwd=cwd,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=timeout_seconds,
         )
     except FileNotFoundError as error:
         raise BuildError(f"{command[0]} not found") from error
+    except subprocess.TimeoutExpired as error:
+        raise BuildError(f"{' '.join(command)} ran past {timeout_seconds} s") from error
     if result.returncode != 0:
         raise BuildError(f"{' '.join(command)} failed: {result.stderr.strip()}")
     return result.stdout.strip()

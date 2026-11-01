@@ -16,11 +16,12 @@ from framework import delivered_framework
 
 SIMULATOR_PLATFORM = "iOS"
 BOOTED = "Booted"
+RUN_TIMEOUT_SECONDS = 120
 
 Runner = Callable[[Path], str]
 """Run a check program binary built for its slice and return its stdout.
 
-Raises BuildError when the run fails.
+Raises BuildError when the run fails or outlasts RUN_TIMEOUT_SECONDS.
 """
 
 
@@ -49,8 +50,8 @@ def compile_program(
     return binary
 
 
-def run_on_mac(binary: Path) -> str:
-    return capture([str(binary)])
+def run_on_mac(binary: Path, timeout_seconds: float = RUN_TIMEOUT_SECONDS) -> str:
+    return capture([str(binary)], timeout_seconds=timeout_seconds)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -97,7 +98,10 @@ def read_booted_simulators() -> list[Simulator]:
 
 def simulator_runner(simulator: Simulator) -> Runner:
     def run(binary: Path) -> str:
-        return capture(["xcrun", "simctl", "spawn", simulator.udid, str(binary)])
+        return capture(
+            ["xcrun", "simctl", "spawn", simulator.udid, str(binary)],
+            timeout_seconds=RUN_TIMEOUT_SECONDS,
+        )
 
     return run
 

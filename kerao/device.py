@@ -12,7 +12,7 @@ from checkout import UPSTREAM_VERSION
 from common import FRAMEWORKS, IOS, BuildError, Check, capture, counterexample
 from framework import delivered_framework, platform_keys
 from macho import read_macho
-from runners import Runner
+from runners import RUN_TIMEOUT_SECONDS, Runner
 
 DEVICE_CHECK = "device"
 PHYSICAL = "physical"
@@ -23,7 +23,6 @@ APP_NAME = "KeraoCodecCheck"
 APP_VERSION = "1"
 APP_RPATH = "@executable_path/Frameworks"
 WILDCARD_APP_NAME = "kerao-codec-check"
-LAUNCH_TIMEOUT_SECONDS = 120
 
 
 @dataclasses.dataclass(frozen=True)
@@ -233,7 +232,7 @@ def make_app(binary: Path, output: Path, target: Target, app: Path) -> Path:
 def launch(udid: str, bundle_id: str) -> str:
     """The console output of one run, whatever devicectl's exit status.
 
-    Raises BuildError when the run outlasts LAUNCH_TIMEOUT_SECONDS.
+    Raises BuildError when the run outlasts RUN_TIMEOUT_SECONDS.
     """
     command = [
         *("xcrun", "devicectl", "device", "process", "launch"),
@@ -245,13 +244,13 @@ def launch(udid: str, bundle_id: str) -> str:
             check=False,
             stdout=subprocess.PIPE,
             text=True,
-            timeout=LAUNCH_TIMEOUT_SECONDS,
+            timeout=RUN_TIMEOUT_SECONDS,
         )
     except FileNotFoundError as error:
         raise BuildError("xcrun not found") from error
     except subprocess.TimeoutExpired as error:
         raise BuildError(
-            f"the codec check app on {udid} ran past {LAUNCH_TIMEOUT_SECONDS} s"
+            f"the codec check app on {udid} ran past {RUN_TIMEOUT_SECONDS} s"
         ) from error
     return result.stdout
 

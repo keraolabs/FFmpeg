@@ -1,5 +1,6 @@
 import dataclasses
 import json
+import shlex
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -375,3 +376,28 @@ def output_path_with_a_comma(tmp: Path) -> tuple[Check, Check]:
         return by_name(checks, f"{MACOS.identifier} {CODECS_CHECK}")
 
     return codecs(good), codecs(bad)
+
+
+FAKE_RUN_TIMEOUT_SECONDS = 1
+SLOW_START_SECONDS = 5
+
+
+@counterexample
+def program_runs_past_the_timeout(tmp: Path) -> tuple[Check, Check]:
+    listed = frozenset({"h264"})
+    result = tmp / "result.txt"
+    result.write_text(fake_program_output(listed, FAKE_DEV_VERSION))
+
+    def run(binary: Path) -> str:
+        return run_on_mac(binary, FAKE_RUN_TIMEOUT_SECONDS)
+
+    def codecs(delay_seconds: int) -> Check:
+        program = tmp / f"program-{delay_seconds}"
+        program.write_text(
+            f"#!/bin/sh\nsleep {delay_seconds}\nexec cat {shlex.quote(str(result))}\n"
+        )
+        program.chmod(0o755)
+        checks, _ = codec_checks(listed, {MACOS: run}, lambda slice_: program, None)
+        return by_name(checks, f"{MACOS.identifier} {CODECS_CHECK}")
+
+    return codecs(0), codecs(SLOW_START_SECONDS)
