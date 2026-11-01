@@ -33,8 +33,7 @@ experimental features     yes
 xmllint enabled           yes
 
 External libraries:
-bzlib                   libuavs3d
-libdav1d                zlib
+libdav1d                libuavs3d               zlib
 
 External libraries providing hardware acceleration:
 

@@ -69,6 +69,7 @@ def artifact_record(
     toolchain: Toolchain,
     configure: dict[str, dict],
     frameworks: list[dict],
+    unverified: list[str],
 ) -> dict:
     """configure maps each slice identifier to its configure args and License line."""
     return {
@@ -89,7 +90,7 @@ def artifact_record(
         "inputs": [],
         "frameworks": frameworks,
         "configure": configure,
-        "unverified": checkout.skipped_checks(mode),
+        "unverified": unverified,
     }
 
 
@@ -198,7 +199,7 @@ def fake_artifact_record(tmp: Path) -> dict:
         }
         for name in FRAMEWORKS
     ]
-    return artifact_record("release", source, FAKE_TOOLCHAIN, configure, frameworks)
+    return artifact_record("release", source, FAKE_TOOLCHAIN, configure, frameworks, [])
 
 
 @counterexample

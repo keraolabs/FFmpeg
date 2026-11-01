@@ -26,7 +26,7 @@ CONFIG_LOG_TAIL_LINES = 40
 CONFIGURED_DECODER = re.compile(r"^#define CONFIG_(\w+)_DECODER 1$", re.MULTILINE)
 
 EXCLUDED_LIBRARIES = ("avdevice", "avfilter", "swscale")
-EXTERNAL_LIBRARIES = ("libdav1d", "libuavs3d", "zlib", "bzlib")
+EXTERNAL_LIBRARIES = ("libdav1d", "libuavs3d", "zlib")
 EXTERNAL_DECODERS = ("libdav1d", "libuavs3d")
 DEMUXERS = ("mov",)
 PARSERS: dict[str, str] = {}
@@ -231,7 +231,7 @@ C compiler                xcrun --sdk macosx clang
 ARCH                      aarch64 (generic)
 
 {COMPONENTS_HEADER}
-bzlib                   libdav1d                libuavs3d
+libdav1d                libuavs3d
 zlib
 
 External libraries providing hardware acceleration:
