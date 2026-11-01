@@ -26,6 +26,7 @@ import artifact
 import checkout
 import ffmpeg
 import framework
+import xcframework
 from common import (
     COUNTEREXAMPLES,
     FRAMEWORKS,
@@ -46,6 +47,7 @@ NOTICES = ("LICENSE.md", "COPYING.LGPLv2.1")
 class SliceBuild:
     checks: list[Check]
     configure: dict[str, object]
+    config_components: Path
     prefix: Path
     frameworks: Path
 
@@ -75,6 +77,7 @@ def build_slice(
             "args": args,
             "license": "; ".join(ffmpeg.license_lines(configure_output)),
         },
+        config_components=build_dir / "config_components.h",
         prefix=prefix,
         frameworks=frameworks,
     )
@@ -144,14 +147,27 @@ def build(output: Path, mode: str) -> int:
         }
         for slice_build in builds.values():
             checks += slice_build.checks
+        checks.append(
+            ffmpeg.check_configured_decoders(
+                {
+                    slice_.identifier: built.config_components
+                    for slice_, built in builds.items()
+                }
+            )
+        )
         shutil.copytree(builds[SLICES[0]].prefix / "include", output / "include")
-        framework.make_xcframeworks(
+        xcframework.make_xcframeworks(
             {slice_: slice_build.frameworks for slice_, slice_build in builds.items()},
             output,
         )
     for slice_ in SLICES:
         for name in FRAMEWORKS:
             checks += framework.framework_checks(output, slice_, name)
+    for name in FRAMEWORKS:
+        checks.append(
+            xcframework.check_library_identifiers(output / f"{name}.xcframework")
+        )
+        checks.append(xcframework.check_public_headers(output, name))
     copy_notices(output / "notices" / "ffmpeg")
     record = artifact.artifact_record(
         mode,
@@ -163,6 +179,7 @@ def build(output: Path, mode: str) -> int:
     artifact_path = output / "artifact.json"
     artifact.write_artifact(artifact_path, record)
     checks.append(artifact.check_artifact_fields(artifact_path))
+    checks.append(artifact.check_artifact_slices(artifact_path))
     print_summary(mode, source, toolchain, output, checks)
     return 0 if all(check.ok for check in checks) else 1
 

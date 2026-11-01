@@ -5,8 +5,8 @@ from pathlib import Path
 
 import checkout
 import ffmpeg
-from common import FRAMEWORKS, Check, Slice, counterexample
-from framework import FAKE_SLICE, delivered_framework, framework_binary
+from common import FRAMEWORKS, MAX_LISTED_LINES, SLICES, Check, Slice, counterexample
+from framework import delivered_framework, framework_binary
 from toolchain import FAKE_TOOLCHAIN, Toolchain
 
 REPOSITORY = "https://github.com/keraolabs/FFmpeg"
@@ -37,7 +37,12 @@ def framework_records(output: Path, slices: tuple[Slice, ...]) -> list[dict]:
     records = []
     for name in FRAMEWORKS:
         binaries = [
-            (slice_, framework_binary(delivered_framework(output, slice_, name)))
+            (
+                slice_,
+                framework_binary(
+                    delivered_framework(output, slice_, name), slice_.layout
+                ),
+            )
             for slice_ in slices
         ]
         records.append(
@@ -102,16 +107,69 @@ def check_artifact_fields(path: Path) -> Check:
     )
 
 
+def check_artifact_slices(path: Path) -> Check:
+    record = json.loads(path.read_text())
+    expected = sorted(slice_.identifier for slice_ in SLICES)
+    sdks = record.get("sdks", {})
+    problems = [] if sorted(sdks) == expected else [f"sdks: {', '.join(sdks)}"]
+    problems += [
+        f"sdks {identifier} has no {key}"
+        for identifier, sdk in sdks.items()
+        for key in ("name", "version")
+        if not sdk.get(key)
+    ]
+    frameworks = record.get("frameworks", [])
+    names = [framework.get("name") for framework in frameworks]
+    if names != list(FRAMEWORKS):
+        problems.append(f"frameworks: {', '.join(map(str, names))}")
+    for framework in frameworks:
+        slices = framework.get("slices", [])
+        found = sorted(str(entry.get("identifier")) for entry in slices)
+        if found != expected:
+            problems.append(f"{framework.get('name')} slices: {', '.join(found)}")
+        problems += [
+            f"{framework.get('name')} {entry.get('identifier')} has no {key}"
+            for entry in slices
+            for key in ("path", "sha256")
+            if not entry.get(key)
+        ]
+    return Check(
+        "artifact.json slices",
+        not problems,
+        "; ".join(problems[:MAX_LISTED_LINES])
+        or f"{len(sdks)} sdks, {len(frameworks)} frameworks with {', '.join(expected)}",
+    )
+
+
+FAKE_SHA256 = "0" * 64
+
+
 def fake_artifact_record(tmp: Path) -> dict:
     source = checkout.read_source(checkout.fake_release_checkout(tmp))
-    sdk = FAKE_TOOLCHAIN.sdks[FAKE_SLICE.identifier]
     configure = {
-        FAKE_SLICE.identifier: {
-            "args": ffmpeg.configure_args(FAKE_SLICE, sdk.path),
+        slice_.identifier: {
+            "args": ffmpeg.configure_args(
+                slice_, FAKE_TOOLCHAIN.sdks[slice_.identifier].path
+            ),
             "license": ffmpeg.EXPECTED_LICENSE,
         }
+        for slice_ in SLICES
     }
-    return artifact_record("release", source, FAKE_TOOLCHAIN, configure, [])
+    frameworks = [
+        {
+            "name": name,
+            "slices": [
+                {
+                    "identifier": slice_.identifier,
+                    "path": f"{name}.xcframework/{slice_.identifier}/{name}.framework/{name}",
+                    "sha256": FAKE_SHA256,
+                }
+                for slice_ in SLICES
+            ],
+        }
+        for name in FRAMEWORKS
+    ]
+    return artifact_record("release", source, FAKE_TOOLCHAIN, configure, frameworks)
 
 
 @counterexample
@@ -122,3 +180,20 @@ def artifact_without_required_field(tmp: Path) -> tuple[Check, Check]:
     bad = tmp / "bad.json"
     write_artifact(bad, {key: value for key, value in record.items() if key != "tag"})
     return check_artifact_fields(good), check_artifact_fields(bad)
+
+
+@counterexample
+def artifact_framework_without_a_slice(tmp: Path) -> tuple[Check, Check]:
+    record = fake_artifact_record(tmp)
+    good = tmp / "good.json"
+    write_artifact(good, record)
+    first, *rest = record["frameworks"]
+    bad = tmp / "bad.json"
+    write_artifact(
+        bad,
+        {
+            **record,
+            "frameworks": [{**first, "slices": first["slices"][:-1]}, *rest],
+        },
+    )
+    return check_artifact_slices(good), check_artifact_slices(bad)

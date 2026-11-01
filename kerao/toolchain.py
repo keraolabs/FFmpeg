@@ -50,17 +50,23 @@ def read_toolchain() -> Toolchain:
     )
 
 
+def fake_sdk(name: str, build: str) -> Sdk:
+    return Sdk(
+        name=name,
+        version="27.0",
+        build=build,
+        platform_version="27.0",
+        path=Path(f"/SDKs/{name}27.0.sdk"),
+    )
+
+
 FAKE_TOOLCHAIN = Toolchain(
     xcode_version="27.0",
     xcode_build="27A266a",
     machine_build="26A434",
     sdks={
-        "macos-arm64": Sdk(
-            name="macosx",
-            version="27.0",
-            build="26A425",
-            platform_version="27.0",
-            path=Path("/SDKs/MacOSX27.0.sdk"),
-        )
+        "ios-arm64": fake_sdk("iphoneos", "24A430"),
+        "ios-arm64-simulator": fake_sdk("iphonesimulator", "24A430"),
+        "macos-arm64": fake_sdk("macosx", "26A425"),
     },
 )

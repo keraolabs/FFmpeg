@@ -7,9 +7,10 @@ from checkout import UPSTREAM_VERSION
 from common import (
     ARCHS,
     FRAMEWORKS,
-    SLICES,
+    MACOS,
     BuildError,
     Check,
+    Layout,
     Slice,
     capture,
     counterexample,
@@ -25,8 +26,6 @@ from macho import (
 )
 from toolchain import FAKE_TOOLCHAIN, Toolchain
 
-VERSION_DIR = Path("Versions") / "A"
-RPATH = "@loader_path/../../.."
 BUNDLE_ID_PREFIX = "org.keraolabs."
 DT_COMPILER = "com.apple.compilers.llvm.clang.1_0"
 CONFIGURE_INSTALL_NAME = re.compile(r"@rpath/(lib\w+)\.[0-9]+\.dylib")
@@ -52,28 +51,42 @@ INFO_PLIST_KEYS = (
 )
 
 
-def install_id(name: str) -> str:
-    return f"@rpath/{name}.framework/{VERSION_DIR}/{name}"
+def install_id(name: str, layout: Layout) -> str:
+    return f"@rpath/{(Path(f'{name}.framework') / layout.contents / name).as_posix()}"
 
 
-BUNDLED = frozenset(install_id(name) for name in FRAMEWORKS)
+def bundled(layout: Layout) -> frozenset[str]:
+    return frozenset(install_id(name, layout) for name in FRAMEWORKS)
 
 
-def framework_binary(framework: Path) -> Path:
-    return framework / VERSION_DIR / framework.stem
+def framework_binary(framework: Path, layout: Layout) -> Path:
+    return framework / layout.contents / framework.stem
+
+
+def framework_headers(framework: Path, layout: Layout) -> Path:
+    return framework / layout.contents / "Headers"
 
 
 def delivered_framework(output: Path, slice_: Slice, name: str) -> Path:
     return output / f"{name}.xcframework" / slice_.identifier / f"{name}.framework"
 
 
-def framework_plist(framework: Path) -> Path:
-    return framework / VERSION_DIR / "Resources" / "Info.plist"
+def framework_plist(framework: Path, layout: Layout) -> Path:
+    return framework / layout.resources / "Info.plist"
 
 
 def xcode_number(version: str) -> str:
     major, minor, patch = (version.split(".") + ["0", "0"])[:3]
     return f"{int(major):02d}{minor}{patch}"
+
+
+def platform_keys(slice_: Slice) -> dict[str, object]:
+    keys: dict[str, object] = {slice_.minimum_version_key: slice_.floor}
+    if slice_.device_families:
+        keys["UIDeviceFamily"] = list(slice_.device_families)
+    if slice_.required_capabilities:
+        keys["UIRequiredDeviceCapabilities"] = list(slice_.required_capabilities)
+    return keys
 
 
 def info_plist(
@@ -99,25 +112,25 @@ def info_plist(
         "DTSDKName": f"{sdk.name}{sdk.version}",
         "DTXcode": xcode_number(toolchain.xcode_version),
         "DTXcodeBuild": toolchain.xcode_build,
-        slice_.minimum_version_key: slice_.floor,
+        **platform_keys(slice_),
     }
 
 
-def rewrite_install_names(binary: Path, name: str) -> None:
+def rewrite_install_names(binary: Path, name: str, layout: Layout) -> None:
     changes: list[str] = []
     for dependency in read_macho(binary).dylibs:
         match = CONFIGURE_INSTALL_NAME.fullmatch(dependency)
         if match and match[1] in FRAMEWORKS:
-            changes += ["-change", dependency, install_id(match[1])]
+            changes += ["-change", dependency, install_id(match[1], layout)]
     capture(
         [
             "xcrun",
             "install_name_tool",
             "-id",
-            install_id(name),
+            install_id(name, layout),
             *changes,
             "-add_rpath",
-            RPATH,
+            layout.rpath,
             str(binary),
         ]
     )
@@ -129,18 +142,22 @@ def make_framework(
     headers: Path,
     plist: dict[str, object],
     frameworks_dir: Path,
+    layout: Layout,
 ) -> Path:
     framework = frameworks_dir / f"{name}.framework"
-    contents = framework / VERSION_DIR
-    (contents / "Resources").mkdir(parents=True)
+    contents = framework / layout.contents
+    contents.mkdir(parents=True)
+    (framework / layout.resources).mkdir(exist_ok=True)
     shutil.copy(dylib, contents / name)
-    shutil.copytree(headers, contents / "Headers")
-    with framework_plist(framework).open("wb") as file:
+    shutil.copytree(headers, framework_headers(framework, layout))
+    with framework_plist(framework, layout).open("wb") as file:
         plistlib.dump(plist, file)
-    (framework / "Versions" / "Current").symlink_to(VERSION_DIR.name)
-    for entry in (name, "Headers", "Resources"):
-        (framework / entry).symlink_to(Path("Versions") / "Current" / entry)
-    rewrite_install_names(contents / name, name)
+    if layout.contents.parts:
+        current = layout.contents.parent / "Current"
+        (framework / current).symlink_to(layout.contents.name)
+        for entry in (name, "Headers", "Resources"):
+            (framework / entry).symlink_to(current / entry)
+    rewrite_install_names(contents / name, name, layout)
     return framework
 
 
@@ -173,12 +190,13 @@ def package_slice(
             prefix / "include" / name,
             info_plist(slice_, name, toolchain, bundle_version),
             frameworks_dir,
+            slice_.layout,
         )
 
 
 def check_info_plist(framework: Path, slice_: Slice) -> Check:
     name = framework.stem
-    with framework_plist(framework).open("rb") as file:
+    with framework_plist(framework, slice_.layout).open("rb") as file:
         plist = plistlib.load(file)
     required = {
         **dict.fromkeys(INFO_PLIST_KEYS),
@@ -188,7 +206,7 @@ def check_info_plist(framework: Path, slice_: Slice) -> Check:
         "CFBundlePackageType": "FMWK",
         "CFBundleShortVersionString": UPSTREAM_VERSION,
         "CFBundleSupportedPlatforms": [slice_.bundle_platform],
-        slice_.minimum_version_key: slice_.floor,
+        **platform_keys(slice_),
     }
     problems = [
         f"no {key}" if key not in plist else f"{key} is {plist[key]!r}"
@@ -202,41 +220,26 @@ def check_info_plist(framework: Path, slice_: Slice) -> Check:
     )
 
 
-def make_xcframeworks(frameworks_dirs: dict[Slice, Path], output: Path) -> None:
-    for name in FRAMEWORKS:
-        xcframework = output / f"{name}.xcframework"
-        command = ["xcrun", "xcodebuild", "-create-xcframework"]
-        for frameworks_dir in frameworks_dirs.values():
-            command += ["-framework", str(frameworks_dir / f"{name}.framework")]
-        capture([*command, "-output", str(xcframework)])
-        for slice_ in frameworks_dirs:
-            if not delivered_framework(output, slice_, name).is_dir():
-                found = sorted(path.name for path in xcframework.iterdir())
-                raise BuildError(
-                    f"{xcframework} has no {slice_.identifier} slice, has: {', '.join(found)}"
-                )
-
-
 def framework_checks(output: Path, slice_: Slice, name: str) -> list[Check]:
+    layout = slice_.layout
     framework = delivered_framework(output, slice_, name)
-    macho = read_macho(framework_binary(framework))
+    macho = read_macho(framework_binary(framework, layout))
     checks = [
         check_build_version(macho, slice_.platform, slice_.floor),
         check_architectures(macho, ARCHS),
-        check_install_id(macho, install_id(name)),
-        check_rpath(macho, RPATH),
-        check_dependencies(macho, BUNDLED),
+        check_install_id(macho, install_id(name, layout)),
+        check_rpath(macho, layout.rpath),
+        check_dependencies(macho, bundled(layout)),
         check_info_plist(framework, slice_),
     ]
     return [scoped(f"{slice_.identifier} {name}", check) for check in checks]
 
 
 FAKE_MAJOR = 1
-FAKE_SLICE = SLICES[0]
 
 
 def fake_frameworks(
-    tmp: Path, cflags: tuple[str, ...] = ("-target", FAKE_SLICE.target)
+    tmp: Path, slice_: Slice = MACOS, cflags: tuple[str, ...] | None = None
 ) -> dict[str, Path]:
     """Package a libavutil and a libavcodec that links it, compiled the way configure links them."""
     prefix = tmp / "prefix"
@@ -255,10 +258,10 @@ def fake_frameworks(
             [
                 "xcrun",
                 "--sdk",
-                FAKE_SLICE.sdk,
+                slice_.sdk,
                 "clang",
                 "-dynamiclib",
-                *cflags,
+                *(cflags or ("-target", slice_.target)),
                 f"-Wl,-install_name,@rpath/{dylib.name}",
                 "-Wl,-headerpad_max_install_names",
                 "-o",
@@ -272,8 +275,9 @@ def fake_frameworks(
             name,
             dylib,
             prefix / "include" / name,
-            info_plist(FAKE_SLICE, name, FAKE_TOOLCHAIN, "1"),
+            info_plist(slice_, name, FAKE_TOOLCHAIN, "1"),
             tmp / "frameworks",
+            slice_.layout,
         )
     return frameworks
 
@@ -287,51 +291,58 @@ def copy_framework(framework: Path, directory: Path) -> Path:
 @counterexample
 def framework_with_second_rpath(tmp: Path) -> tuple[Check, Check]:
     framework = fake_frameworks(tmp)["libavutil"]
-    good = check_rpath(read_macho(framework_binary(framework)), RPATH)
-    bad = framework_binary(copy_framework(framework, tmp / "bad"))
+    good = check_rpath(
+        read_macho(framework_binary(framework, MACOS.layout)), MACOS.layout.rpath
+    )
+    bad = framework_binary(copy_framework(framework, tmp / "bad"), MACOS.layout)
     capture(["xcrun", "install_name_tool", "-add_rpath", str(tmp), str(bad)])
-    return good, check_rpath(read_macho(bad), RPATH)
+    return good, check_rpath(read_macho(bad), MACOS.layout.rpath)
 
 
 @counterexample
 def install_id_is_absolute(tmp: Path) -> tuple[Check, Check]:
     framework = fake_frameworks(tmp)["libavutil"]
     good = check_install_id(
-        read_macho(framework_binary(framework)), install_id("libavutil")
+        read_macho(framework_binary(framework, MACOS.layout)),
+        install_id("libavutil", MACOS.layout),
     )
-    bad = framework_binary(copy_framework(framework, tmp / "bad"))
+    bad = framework_binary(copy_framework(framework, tmp / "bad"), MACOS.layout)
     capture(["xcrun", "install_name_tool", "-id", str(bad), str(bad)])
-    return good, check_install_id(read_macho(bad), install_id("libavutil"))
+    return good, check_install_id(
+        read_macho(bad), install_id("libavutil", MACOS.layout)
+    )
 
 
 @counterexample
 def dependency_left_on_configure_install_name(tmp: Path) -> tuple[Check, Check]:
     framework = fake_frameworks(tmp)["libavcodec"]
-    good = check_dependencies(read_macho(framework_binary(framework)), BUNDLED)
-    bad = framework_binary(copy_framework(framework, tmp / "bad"))
+    good = check_dependencies(
+        read_macho(framework_binary(framework, MACOS.layout)), bundled(MACOS.layout)
+    )
+    bad = framework_binary(copy_framework(framework, tmp / "bad"), MACOS.layout)
     unrewritten = f"@rpath/libavutil.{FAKE_MAJOR}.dylib"
     capture(
         [
             "xcrun",
             "install_name_tool",
             "-change",
-            install_id("libavutil"),
+            install_id("libavutil", MACOS.layout),
             unrewritten,
             str(bad),
         ]
     )
-    return good, check_dependencies(read_macho(bad), BUNDLED)
+    return good, check_dependencies(read_macho(bad), bundled(MACOS.layout))
 
 
 @counterexample
 def binary_built_above_floor(tmp: Path) -> tuple[Check, Check]:
     def build_version(directory: Path, target: str) -> Check:
-        framework = fake_frameworks(directory, ("-target", target))["libavutil"]
-        macho = read_macho(framework_binary(framework))
-        return check_build_version(macho, FAKE_SLICE.platform, FAKE_SLICE.floor)
+        framework = fake_frameworks(directory, MACOS, ("-target", target))["libavutil"]
+        macho = read_macho(framework_binary(framework, MACOS.layout))
+        return check_build_version(macho, MACOS.platform, MACOS.floor)
 
     return (
-        build_version(tmp / "good", FAKE_SLICE.target),
+        build_version(tmp / "good", MACOS.target),
         build_version(tmp / "bad", "arm64-apple-macos15.0"),
     )
 
@@ -339,18 +350,20 @@ def binary_built_above_floor(tmp: Path) -> tuple[Check, Check]:
 @counterexample
 def binary_with_x86_64_slice(tmp: Path) -> tuple[Check, Check]:
     def architectures(directory: Path, cflags: tuple[str, ...]) -> Check:
-        framework = fake_frameworks(directory, cflags)["libavutil"]
-        return check_architectures(read_macho(framework_binary(framework)), ARCHS)
+        framework = fake_frameworks(directory, MACOS, cflags)["libavutil"]
+        return check_architectures(
+            read_macho(framework_binary(framework, MACOS.layout)), ARCHS
+        )
 
     universal = (
         "-arch",
         "arm64",
         "-arch",
         "x86_64",
-        f"-mmacosx-version-min={FAKE_SLICE.floor}",
+        f"-mmacosx-version-min={MACOS.floor}",
     )
     return (
-        architectures(tmp / "good", ("-target", FAKE_SLICE.target)),
+        architectures(tmp / "good", ("-target", MACOS.target)),
         architectures(tmp / "bad", universal),
     )
 
@@ -358,11 +371,11 @@ def binary_with_x86_64_slice(tmp: Path) -> tuple[Check, Check]:
 @counterexample
 def info_plist_without_minimum_version(tmp: Path) -> tuple[Check, Check]:
     framework = fake_frameworks(tmp)["libavutil"]
-    good = check_info_plist(framework, FAKE_SLICE)
+    good = check_info_plist(framework, MACOS)
     bad = copy_framework(framework, tmp / "bad")
-    with framework_plist(bad).open("rb") as file:
+    with framework_plist(bad, MACOS.layout).open("rb") as file:
         plist = plistlib.load(file)
-    del plist[FAKE_SLICE.minimum_version_key]
-    with framework_plist(bad).open("wb") as file:
+    del plist[MACOS.minimum_version_key]
+    with framework_plist(bad, MACOS.layout).open("wb") as file:
         plistlib.dump(plist, file)
-    return good, check_info_plist(bad, FAKE_SLICE)
+    return good, check_info_plist(bad, MACOS)
