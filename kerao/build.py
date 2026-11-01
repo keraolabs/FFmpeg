@@ -24,13 +24,17 @@ from pathlib import Path
 
 import artifact
 import checkout
+import codec_check
 import deps
 import ffmpeg
 import framework
+import runners
 import xcframework
 from common import (
     COUNTEREXAMPLES,
     FRAMEWORKS,
+    IOS_SIMULATOR,
+    MACOS,
     ROOT,
     SLICES,
     BuildError,
@@ -108,6 +112,7 @@ def print_summary(
     toolchain: Toolchain | None,
     output: Path | None,
     checks: list[Check],
+    unverified: tuple[str, ...] = (),
 ) -> None:
     facts = [
         ("mode", mode),
@@ -132,6 +137,8 @@ def print_summary(
     facts += [(dep.name, f"{dep.tag} {dep.commit}") for dep in DEPS]
     if output is not None:
         facts.append(("output", str(output)))
+    if unverified:
+        facts.append(("unverified", ", ".join(unverified)))
     width = max(len(label) for label, _ in facts)
     print("\n".join(f"{label:<{width}}  {value}" for label, value in facts))
     print()
@@ -148,7 +155,12 @@ def build(output: Path, mode: str) -> int:
     if output.exists() and (not output.is_dir() or any(output.iterdir())):
         raise BuildError(f"--output {output} must be a new or empty directory")
     source = checkout.read_source(ROOT)
-    checks = checkout.preconditions(source, mode)
+    listed = codec_check.load_manifest(codec_check.MANIFEST)
+    simulators = runners.read_booted_simulators()
+    checks = [
+        *checkout.preconditions(source, mode),
+        runners.check_booted_simulator(simulators),
+    ]
     if not all(check.ok for check in checks):
         print_summary(mode, source, None, None, checks)
         print("not built: preconditions failed")
@@ -199,19 +211,34 @@ def build(output: Path, mode: str) -> int:
             xcframework.check_library_identifiers(output / f"{name}.xcframework")
         )
         checks.append(xcframework.check_public_headers(output, name))
+    with tempfile.TemporaryDirectory(prefix="kerao-codec-check-") as tmp:
+        program_checks, unverified_programs = codec_check.codec_checks(
+            listed,
+            {
+                MACOS: runners.run_on_mac,
+                IOS_SIMULATOR: runners.simulator_runner(simulators[0]),
+            },
+            toolchain,
+            output,
+            Path(tmp),
+            checkout.release_tag(source) if mode == "release" else None,
+        )
+    checks += program_checks
+    unverified = (*checkout.skipped_checks(mode), *unverified_programs)
     record = artifact.artifact_record(
         mode,
         source,
         toolchain,
         {slice_.identifier: built.configure for slice_, built in builds.items()},
         artifact.framework_records(output, SLICES),
+        list(unverified),
     )
     artifact_path = output / "artifact.json"
     artifact.write_artifact(artifact_path, record)
     checks.append(artifact.check_artifact_fields(artifact_path))
     checks.append(artifact.check_artifact_slices(artifact_path))
     checks.append(artifact.check_artifact_deps(artifact_path))
-    print_summary(mode, source, toolchain, output, checks)
+    print_summary(mode, source, toolchain, output, checks, unverified)
     return 0 if all(check.ok for check in checks) else 1
 
 

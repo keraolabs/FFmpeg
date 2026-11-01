@@ -15,6 +15,7 @@ python3 kerao/build.py --self-test
 - Xcode, with the iOS, iOS Simulator and macOS SDKs, and Python 3.11 or newer.
 - `meson`, `ninja`, `cmake` and `pkg-config` from Homebrew: `brew install meson ninja cmake pkgconf`. Their versions are not pinned; `artifact.json` records the ones used.
 - Network access to the two upstream repositories below.
+- A booted iOS Simulator running iOS 17.0 or newer, for the codec check: `xcrun simctl boot <udid>`. Without one the build stops before it starts.
 
 ## Dependencies
 
@@ -58,3 +59,11 @@ The public headers are byte-identical across the three slices, and `include/` is
 `artifact.json` holds `libraries`, `repository`, `tag`, `commit`, `mode`, `dirty`, `built_at`, `xcode_build`, `sdks`, `tools`, `deps`, `inputs`, `frameworks`, `configure` and `unverified`. `tools` maps `meson`, `ninja`, `cmake` and `pkg-config` to their versions. Each `deps[]` entry gives a dependency's `name`, `repository`, `tag` and `commit`. Each `frameworks[].slices[]` entry gives a slice identifier, the binary's path relative to `<dir>` and its SHA-256. A `dev` build lists in `unverified` the checks it skipped.
 
 `configure/<slice>.txt` is the configure output of the current build arguments. Commit it to `kerao/configure/` whenever the `committed configure output` check fails.
+
+## Codec check
+
+`kerao/codecs.json` lists the codecs `libavcodec` must decode, by their `avcodec_get_name()` names, grouped by media type. It comes from appendix A of `kerao/research/mpv-app-store-codecs.md`, a copy of the research on the codecs that the six mpv-based App Store players ship. The manifest also records the players, the research dates, and the codecs it leaves out with the reason for each.
+
+After packaging, the build compiles `kerao/codec_check.c` for each slice against that slice's four delivered frameworks. The program prints `av_version_info()` and the codec of every decoder `av_codec_iterate()` returns. The macOS slice runs directly, and the Simulator slice runs in the booted Simulator through `xcrun simctl spawn`. A slice fails when any listed codec has no decoder, or when the version is not the release tag (`release`) or `n9.0.2` followed by nothing or `-` (`dev`). The summary names the decoded codecs that the list leaves out.
+
+The `ios-arm64` slice has no runner yet. A `dev` build lists its two checks in `unverified`, and a `release` build fails them.
