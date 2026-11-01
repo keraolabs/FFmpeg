@@ -1,6 +1,42 @@
 # kerao
 
-Builds FFmpeg's LGPL `libavutil`, `libavcodec`, `libavformat` and `libswresample` for Apple platforms.
+Builds FFmpeg's LGPL `libavutil`, `libavcodec`, `libavformat` and `libswresample` for Apple platforms. This branch holds everything a rebuild needs: the build script, the committed configure output, the codec list with its research and the required-reason API records. FFmpeg's own sources are not patched.
+
+## Prerequisites
+
+- A Mac with Apple silicon.
+- Xcode, selected, set up and with the iOS platform installed:
+
+  ```sh
+  sudo xcode-select --switch /Applications/Xcode.app
+  sudo xcodebuild -runFirstLaunch
+  xcodebuild -downloadPlatform iOS
+  ```
+
+- Python 3.11 or newer as `python3`, and `meson`, `ninja`, `cmake` and `pkg-config`, all from Homebrew: `brew install python meson ninja cmake pkgconf`. The `/usr/bin/python3` that macOS ships is too old. The tools' versions are not pinned; `artifact.json` records the ones used.
+- Network access to the two upstream repositories under [Dependencies](#dependencies).
+- A booted iOS Simulator running iOS 17.0 or newer, for the codec check. `xcrun simctl list devices available` lists them and `xcrun simctl boot <udid>` boots one. Without one the build stops before it starts.
+- For a `release` build, an iPhone and a signing identity, see below. A `dev` build can do without them.
+
+### iPhone and signing
+
+The `ios-arm64` codec check runs on an iPhone with iOS 17.0 or newer, paired with this Mac, in Developer Mode and unlocked. A free personal team is enough. On a Mac that has never run an app on that iPhone:
+
+1. Add your Apple Account in Xcode's settings, under Accounts.
+2. Connect the iPhone, trust this Mac on it, and turn on Settings › Privacy & Security › Developer Mode, which appears once Xcode has seen the iPhone.
+3. In Xcode, run any iOS app on the iPhone with Automatically manage signing and your team. Xcode creates an Apple Development identity and a development profile for that app's bundle ID. With a free team, iOS refuses the first launch until you trust the developer in Settings › General › VPN & Device Management.
+
+The build then takes three arguments:
+
+- `--device`: the iPhone's UDID, from `xcrun devicectl list devices`.
+- `--codesign-identity`: the SHA-1 of the Apple Development identity, as `security find-identity -v -p codesigning` prints it. Names are refused, because two identities can share one.
+- `--provisioning-profile`: a development `.mobileprovision` that lists the iPhone and holds that identity's certificate, such as the one step 3 left in `~/Library/Developer/Xcode/UserData/Provisioning Profiles/`. `security cms -D -i <path>` prints its app ID, devices and expiry. Its team and app ID sign the runner app.
+
+None of them is stored in the repository. A `release` build without `--device` stops before it starts, and so does any build whose iPhone `devicectl` does not list as paired, or whose profile has expired, does not list the iPhone or lacks the identity's certificate.
+
+## Usage
+
+`kerao/build.py` is the entry point. It builds the checkout it lives in from any working directory, so it can be called by its absolute path.
 
 ```sh
 python3 kerao/build.py --output <dir> --mode dev [--device <udid> --codesign-identity <sha-1> --provisioning-profile <path>]
@@ -8,20 +44,32 @@ python3 kerao/build.py --output <dir> --mode release --device <udid> --codesign-
 python3 kerao/build.py --self-test
 ```
 
-`release` builds only a clean checkout whose HEAD is an annotated `n9.0.2-kerao.<n>` tag, and needs an iPhone. `dev` builds any checkout, with or without an iPhone.
+- `--output`: a new or empty directory for the build products. Keep it outside the checkout: products inside it make the worktree dirty, and a `release` build refuses a dirty one.
+- `--mode`: `release` or `dev`, see [Modes](#modes).
+- `--device`, `--codesign-identity`, `--provisioning-profile`: all three or none, see [iPhone and signing](#iphone-and-signing).
+- `--self-test`: runs the [self-test](#self-test) instead of a build.
 
-## Prerequisites
+A build runs every check before it exits and prints a summary to stdout: the commit, toolchain and dependencies, then one `pass` or `FAIL` line per check. The build tools write to stderr. The exit status is 0 only when every check passes. When a precondition fails, nothing is built. A failing tool or a missing file stops the build at once with `error:` on stderr.
 
-- Xcode, with the iOS, iOS Simulator and macOS SDKs, and Python 3.11 or newer.
-- `meson`, `ninja`, `cmake` and `pkg-config` from Homebrew: `brew install meson ninja cmake pkgconf`. Their versions are not pinned; `artifact.json` records the ones used.
-- Network access to the two upstream repositories below.
-- A booted iOS Simulator running iOS 17.0 or newer, for the codec check: `xcrun simctl boot <udid>`. Without one the build stops before it starts.
-- For the `ios-arm64` codec check, an iPhone running iOS 17.0 or newer, paired with this Mac, in Developer Mode and unlocked, and three arguments:
-  - `--device`: its UDID, from `xcrun devicectl list devices`.
-  - `--codesign-identity`: the SHA-1 of an Apple Development identity in the keychain, as `security find-identity -v -p codesigning` prints it. Names are refused, because two identities can share one.
-  - `--provisioning-profile`: a development `.mobileprovision` that lists the iPhone and holds that identity's certificate, such as one Xcode keeps in `~/Library/Developer/Xcode/UserData/Provisioning Profiles/`. Its team and app ID sign the runner app.
+## Modes
 
-  None of them is stored in the repository. A `release` build without `--device` stops before it starts, and so does any build whose iPhone `devicectl` does not list as paired, or whose profile has expired, does not list the iPhone or lacks the identity's certificate.
+Both modes need a checkout without a `VERSION` file, because one would override the `git describe` that `av_version_info()` reports.
+
+| | `release` | `dev` |
+| --- | --- | --- |
+| Checkout | HEAD carries exactly one annotated `n9.0.2-kerao.<n>` tag, and `git status` shows nothing, untracked files included | any commit and worktree whose `git describe --tags` starts with `n9.0.2` |
+| iPhone | required | optional |
+| `av_version_info()` of every slice | exactly the tag | `n9.0.2`, or `n9.0.2-` followed by anything |
+| `artifact.json` `tag` | the tag | `git describe --tags --always` |
+| `artifact.json` `unverified` | `[]` | `release tag` and `clean worktree`, plus `ios-arm64 codecs` and `ios-arm64 av_version_info` without `--device` |
+
+core's release packaging and the libplacebo fork's `release` mode accept only `release` artifacts.
+
+## Self-test
+
+`--self-test` runs each check against counterexamples without building FFmpeg. Every counterexample gives the check an input it must pass and a broken copy it must fail, such as a framework with a second `LC_RPATH` or a codec list naming a codec no decoder has. It needs Xcode, but no network, Simulator or iPhone, and takes a few seconds.
+
+A check is a `check_*` function in `kerao/`, and the self-test also fails when no counterexample calls one. A new check therefore comes with a counterexample registered through `@counterexample`.
 
 ## Dependencies
 
@@ -62,23 +110,39 @@ Each xcframework has three slices, built for iOS 17.0, the iOS 17.0 Simulator an
 
 The public headers are byte-identical across the three slices, and `include/` is a copy of them.
 
+`configure/<slice>.txt` is the configure output of the current build arguments. Commit it to `kerao/configure/` whenever the `committed configure output` check fails.
+
+### artifact.json
+
+| Field | Value |
+| --- | --- |
+| `libraries` | `["libavutil", "libavcodec", "libavformat", "libswresample"]` |
+| `repository` | `https://github.com/keraolabs/FFmpeg` |
+| `tag` | see [Modes](#modes) |
+| `commit` | HEAD's full commit hash |
+| `mode` | `release` or `dev` |
+| `dirty` | `true` when `git status` lists any change, untracked files included |
+| `built_at` | when `artifact.json` was written, in UTC, as `2026-11-01T12:43:24Z` |
+| `xcode_build` | Xcode's build version, as `27A266a` |
+| `sdks` | each slice identifier mapped to its SDK's `name` and `version`, as `{"name": "iphoneos", "version": "27.0"}` |
+| `tools` | `meson`, `ninja`, `cmake` and `pkg-config`, each mapped to the version it reports |
+| `deps` | one entry per [dependency](#dependencies) with its `name`, `repository`, `tag` and `commit` |
+| `inputs` | `[]`, because no other kerao artifact goes into this one |
+| `frameworks` | one entry per library with its `name` and `slices`; each slice gives its `identifier`, the binary's `path` relative to `<dir>` and its `sha256` |
+| `configure` | each slice identifier mapped to its configure `args`, in full, and its `license` line |
+| `unverified` | the names of the checks this build skipped, see [Modes](#modes) |
+
 ## Privacy manifests
 
 Every framework carries a `PrivacyInfo.xcprivacy`: at the top level on iOS, in `Versions/A/Resources/` on macOS. It declares no tracking, no tracking domains and no collected data, and its `NSPrivacyAccessedAPITypes` come from `kerao/required-reason-api/<lib>.json`. Each record entry gives a category, the APIs used, their purpose, the approved reason codes and why the library uses them. `apple.json` is Apple's required-reason API list, with its source pages and the date it was copied.
 
 After the build, `nm -u` and the `__objc_methname` section of every binary are matched against `apple.json`. An API that a binary uses and its record does not declare fails the build. A recorded API the scan does not see is only reported. Update `apple.json` when Apple changes the list, and the records when a library's use changes.
 
-`artifact.json` holds `libraries`, `repository`, `tag`, `commit`, `mode`, `dirty`, `built_at`, `xcode_build`, `sdks`, `tools`, `deps`, `inputs`, `frameworks`, `configure` and `unverified`. `tools` maps `meson`, `ninja`, `cmake` and `pkg-config` to their versions. Each `deps[]` entry gives a dependency's `name`, `repository`, `tag` and `commit`. Each `frameworks[].slices[]` entry gives a slice identifier, the binary's path relative to `<dir>` and its SHA-256. A `dev` build lists in `unverified` the checks it skipped.
-
-`configure/<slice>.txt` is the configure output of the current build arguments. Commit it to `kerao/configure/` whenever the `committed configure output` check fails.
-
 ## Codec check
 
 `kerao/codecs.json` lists the codecs `libavcodec` must decode, by their `avcodec_get_name()` names, grouped by media type. It comes from appendix A of `kerao/research/mpv-app-store-codecs.md`, a copy of the research on the codecs that the six mpv-based App Store players ship. The manifest also records the players, the research dates, and the codecs it leaves out with the reason for each.
 
-After packaging, the build compiles `kerao/codec_check.c` for each slice against that slice's four delivered frameworks. The program prints `av_version_info()` and the codec of every decoder `av_codec_iterate()` returns. The macOS slice runs directly, the Simulator slice runs in the booted Simulator through `xcrun simctl spawn`, and the `ios-arm64` slice runs on the iPhone in a runner app. A slice fails when any listed codec has no decoder, or when the version is not the release tag (`release`) or `n9.0.2` followed by nothing or `-` (`dev`). The summary names the decoded codecs that the list leaves out.
-
-A `dev` build without `--device` lists `ios-arm64 codecs` and `ios-arm64 av_version_info` in `unverified`.
+After packaging, the build compiles `kerao/codec_check.c` for each slice against that slice's four delivered frameworks. The program prints `av_version_info()` and the codec of every decoder `av_codec_iterate()` returns. The macOS slice runs directly, the Simulator slice runs in the booted Simulator through `xcrun simctl spawn`, and the `ios-arm64` slice runs on the iPhone in a runner app. A slice fails when any listed codec has no decoder, or when the version does not match its [mode](#modes). The summary names the decoded codecs that the list leaves out.
 
 ### Runner app
 
@@ -100,3 +164,26 @@ A run is judged by its console output alone, and on the iPhone devicectl's exit 
 - With a 2 s sleep before exiting (4 runs), devicectl exited with the app's code (0, 3, 5), printed "The app terminated with the exit code <n>." and wrote it as `terminationResult.exitCode`. After `abort()` it exited 1 and printed "App terminated due to signal 6."
 - When the app exited at once (7 runs), devicectl exited 1 with CoreDeviceError 10004, "The process identifier of the launched application could not be determined", in 5 runs, including one `return 0`. One `abort()` was reported as "exit code 0" with status 0. Only one run, a `return 0`, came back correct.
 - The codec check program finishes in under a second. Of 11 runs against the delivered frameworks, 3 ended in error 10004 with status 1. All 11 printed the complete result.
+
+## Cutting a release
+
+A release is an annotated `n9.0.2-kerao.<n>` tag on the `kerao` branch, built once from a fresh clone. `<n>` starts at 1 for each upstream tag. A tag is never moved, deleted or reused: a fix ships as the next `<n>`, on a new commit, because a HEAD with two release tags fails `release tag`. Rebuilding from an existing tag needs no new one.
+
+1. Merge everything the release ships into `kerao`, then tag its tip and push the tag:
+
+   ```sh
+   git switch kerao
+   git pull --ff-only
+   git tag -a n9.0.2-kerao.<n> -m n9.0.2-kerao.<n>
+   git push origin n9.0.2-kerao.<n>
+   ```
+
+2. Clone the tag into a new directory and build it in `release` mode, with the Simulator booted and the iPhone connected:
+
+   ```sh
+   git clone --branch n9.0.2-kerao.<n> https://github.com/keraolabs/FFmpeg.git <clone>
+   python3 <clone>/kerao/build.py --output <dir> --mode release --device <udid> \
+       --codesign-identity <sha-1> --provisioning-profile <path> > summary.txt
+   ```
+
+3. The build must exit 0. `artifact.json` then has `mode` `release`, `dirty` `false`, `tag` `n9.0.2-kerao.<n>` and `unverified` `[]`, and the summary's three `av_version_info` lines read exactly `n9.0.2-kerao.<n>`. The fork has no CI, so post `summary.txt` and `artifact.json` on the release's issue in keraolabs/kerao as its evidence.
