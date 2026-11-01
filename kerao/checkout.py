@@ -116,10 +116,6 @@ def preconditions(source: Source, mode: str) -> list[Check]:
     return checks
 
 
-def skipped_checks(mode: str) -> list[str]:
-    return [] if mode == "release" else [RELEASE_TAG_CHECK, CLEAN_WORKTREE_CHECK]
-
-
 FAKE_GIT_ENV = {
     "PATH": os.environ["PATH"],
     "GIT_CONFIG_GLOBAL": os.devnull,

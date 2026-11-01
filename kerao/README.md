@@ -49,7 +49,7 @@ python3 kerao/build.py --self-test
 - `--device`, `--codesign-identity`, `--provisioning-profile`: all three or none, see [iPhone and signing](#iphone-and-signing).
 - `--self-test`: runs the [self-test](#self-test) instead of a build.
 
-A build runs every check before it exits and prints a summary to stdout: the commit, toolchain and dependencies, then one `pass` or `FAIL` line per check. The build tools write to stderr. The exit status is 0 only when every check passes. When a precondition fails, nothing is built. A failing tool or a missing file stops the build at once with `error:` on stderr, except in the [codec check](#completion-protocol), where it fails that slice's checks.
+A build runs every check before it exits and prints a summary to stdout: the commit, toolchain and dependencies, the checks it did not run as `unverified`, then one `pass` or `FAIL` line per check. The build tools write to stderr. The exit status is 0 only when every check passes. When a precondition fails, nothing is built. A failing tool or a missing file stops the build at once with `error:` on stderr, except in the [codec check](#completion-protocol), where it fails that slice's checks.
 
 ## Modes
 
@@ -61,7 +61,7 @@ Both modes need a checkout without a `VERSION` file, because one would override 
 | iPhone | required | optional |
 | `av_version_info()` of every slice | exactly the tag | `n9.0.2`, or `n9.0.2-` followed by anything |
 | `artifact.json` `tag` | the tag | `git describe --tags --always` |
-| `artifact.json` `unverified` | `[]` | `release tag` and `clean worktree`, plus `ios-arm64 codecs` and `ios-arm64 av_version_info` without `--device` |
+| `artifact.json` `unverified` | `[]` | `ios-arm64 codecs` and `ios-arm64 av_version_info` without `--device`, otherwise `[]` |
 
 core's release packaging and the libplacebo fork's `release` mode accept only `release` artifacts.
 
@@ -130,7 +130,7 @@ The public headers are byte-identical across the three slices, and `include/` is
 | `inputs` | `[]`, because no other kerao artifact goes into this one |
 | `frameworks` | one entry per library with its `name` and `slices`; each slice gives its `identifier`, the binary's `path` relative to `<dir>` and its `sha256` |
 | `configure` | each slice identifier mapped to its configure `args`, in full, and its `license` line |
-| `unverified` | the names of the checks this build skipped, see [Modes](#modes) |
+| `unverified` | the names of the artifact checks this build did not run, see [Modes](#modes). The release preconditions a `dev` build skips are not among them: `mode`, `commit` and `dirty` identify a `dev` artifact |
 
 ## Privacy manifests
 

@@ -8,6 +8,7 @@ from checkout import UPSTREAM_TAG
 from common import (
     FRAMEWORKS,
     IOS,
+    IOS_SIMULATOR,
     MACOS,
     ROOT,
     SLICES,
@@ -308,6 +309,19 @@ def device_launch_fails_on_first_slice(tmp: Path) -> tuple[Check, Check]:
         by_name(checks, f"{MACOS.identifier} {VERSION_CHECK}"),
         by_name(checks, f"{IOS.identifier} {CODECS_CHECK}"),
     )
+
+
+@counterexample
+def dev_build_without_a_device(tmp: Path) -> tuple[Check, Check]:
+    listed = frozenset({"h264"})
+    runs = fake_runner(fake_program_output(listed, FAKE_DEV_VERSION))
+
+    def unverified(slices: tuple[Slice, ...]) -> Check:
+        slice_runners = {slice_: runs for slice_ in slices}
+        _, names = codec_checks(listed, slice_runners, fake_compile(tmp), None)
+        return Check("unverified", not names, ", ".join(names) or "none")
+
+    return unverified(SLICES), unverified((IOS_SIMULATOR, MACOS))
 
 
 FAKE_PROGRAM = """\

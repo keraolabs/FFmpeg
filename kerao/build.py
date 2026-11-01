@@ -230,28 +230,27 @@ def build(output: Path, mode: str, target: device.Target | None) -> int:
         **({IOS: device.device_runner(target, output)} if target else {}),
     }
     with tempfile.TemporaryDirectory(prefix="kerao-codec-check-") as tmp:
-        program_checks, unverified_programs = codec_check.codec_checks(
+        program_checks, unverified = codec_check.codec_checks(
             listed,
             slice_runners,
             codec_check.program_compiler(toolchain, output, Path(tmp)),
             checkout.release_tag(source) if mode == "release" else None,
         )
     checks += program_checks
-    unverified = (*checkout.skipped_checks(mode), *unverified_programs)
     record = artifact.artifact_record(
         mode,
         source,
         toolchain,
         {slice_.identifier: built.configure for slice_, built in builds.items()},
         artifact.framework_records(output, SLICES),
-        list(unverified),
+        unverified,
     )
     artifact_path = output / "artifact.json"
     artifact.write_artifact(artifact_path, record)
     checks.append(artifact.check_artifact_fields(artifact_path))
     checks.append(artifact.check_artifact_slices(artifact_path))
     checks.append(artifact.check_artifact_deps(artifact_path))
-    print_summary(mode, source, toolchain, output, checks, unverified)
+    print_summary(mode, source, toolchain, output, checks, tuple(unverified))
     return 0 if all(check.ok for check in checks) else 1
 
 
