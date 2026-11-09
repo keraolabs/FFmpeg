@@ -1391,7 +1391,7 @@ static int extract_extradata(FFFormatContext *si, AVStream *st, const AVPacket *
  * @return < 0 on error, 0 if pkt holds a packet to return, 1 if pkt was
  *         consumed
  */
-static int process_packet(AVFormatContext *s, AVPacket *pkt)
+static av_always_inline int process_packet(AVFormatContext *s, AVPacket *pkt)
 {
     FormatContextInternal *const fci = ff_fc_internal(s);
     FFFormatContext *const si = &fci->fc;
@@ -1516,7 +1516,7 @@ static int process_packet(AVFormatContext *s, AVPacket *pkt)
  * @return ret, or the input's error when ret is AVERROR_EOF because the input
  *         failed
  */
-static int finish_frame(AVFormatContext *s, AVPacket *pkt, int ret)
+static av_always_inline int finish_frame(AVFormatContext *s, AVPacket *pkt, int ret)
 {
     FormatContextInternal *const fci = ff_fc_internal(s);
     AVDictionary *metadata = NULL;
@@ -1712,6 +1712,131 @@ int av_read_frame(AVFormatContext *s, AVPacket *pkt)
 return_packet:
     return_packet(s, pkt);
     return ret;
+}
+
+/**
+ * Move the oldest packet of stream stream_index out of list into pkt.
+ *
+ * @return 1 if there was one, 0 if not
+ */
+static int take_stream_packet(PacketList *list, int stream_index, AVPacket *pkt)
+{
+    PacketListEntry *prev = NULL;
+
+    for (PacketListEntry *pktl = list->head; pktl; prev = pktl, pktl = pktl->next) {
+        if (pktl->pkt.stream_index != stream_index)
+            continue;
+        if (prev)
+            prev->next = pktl->next;
+        else
+            list->head = pktl->next;
+        if (list->tail == pktl)
+            list->tail = prev;
+        *pkt = pktl->pkt;
+        av_free(pktl);
+        return 1;
+    }
+    return 0;
+}
+
+static int has_stream_packet(const PacketList *list, int stream_index)
+{
+    for (const PacketListEntry *pktl = list->head; pktl; pktl = pktl->next)
+        if (pktl->pkt.stream_index == stream_index)
+            return 1;
+    return 0;
+}
+
+/**
+ * The next packet of stream stream_index that ff_read_packet() would return.
+ *
+ * @return 0 on success, < 0 as ff_read_packet()
+ */
+static int read_stream_raw_packet(AVFormatContext *s, int stream_index, AVPacket *pkt)
+{
+    FormatContextInternal *const fci = ff_fc_internal(s);
+
+    for (;;) {
+        int err;
+
+        av_packet_unref(pkt);
+        if (take_stream_packet(&fci->raw_packet_buffer, stream_index, pkt)) {
+            fci->raw_packet_buffer_size -= pkt->size;
+            return 0;
+        }
+        err = ffifmt(s->iformat)->read_stream_packet(s, stream_index, pkt);
+        if (err < 0) {
+            av_packet_unref(pkt);
+            return err;
+        }
+        err = av_packet_make_refcounted(pkt);
+        if (err < 0) {
+            av_packet_unref(pkt);
+            return err;
+        }
+        err = handle_new_packet(s, pkt, 1);
+        if (err <= 0)
+            return err;
+    }
+}
+
+/**
+ * read_frame_internal() for the packets of stream stream_index. The packets
+ * and parsers of every other stream stay as they are.
+ */
+static int read_stream_frame(AVFormatContext *s, int stream_index, AVPacket *pkt)
+{
+    FormatContextInternal *const fci = ff_fc_internal(s);
+    FFStream *const sti = ffstream(s->streams[stream_index]);
+    int ret = 0, got_packet = 0;
+
+    while (!got_packet && !has_stream_packet(&fci->parse_queue, stream_index)) {
+        ret = read_stream_raw_packet(s, stream_index, pkt);
+        if (ret < 0) {
+            if (ret == AVERROR(EAGAIN))
+                return ret;
+            if (sti->parser && sti->need_parsing)
+                parse_packet(s, pkt, stream_index, 1);
+            break;
+        }
+        ret = process_packet(s, pkt);
+        if (ret < 0)
+            return ret;
+        got_packet = !ret;
+    }
+
+    if (!got_packet && take_stream_packet(&fci->parse_queue, stream_index, pkt))
+        ret = 0;
+
+    return finish_frame(s, pkt, ret);
+}
+
+int av_read_stream_packet(AVFormatContext *s, int stream_index, AVPacket *pkt)
+{
+    FormatContextInternal *const fci = ff_fc_internal(s);
+    FFFormatContext *const si = &fci->fc;
+    const FFInputFormat *const ifmt = ffifmt(s->iformat);
+    int ret;
+
+    if (!ifmt->read_stream_packet || s->flags & AVFMT_FLAG_GENPTS ||
+        s->use_wallclock_as_timestamps)
+        return AVERROR(ENOSYS);
+    if (stream_index < 0 || stream_index >= s->nb_streams ||
+        s->streams[stream_index]->discard >= AVDISCARD_ALL)
+        return AVERROR(EINVAL);
+    if (ffstream(s->streams[stream_index])->request_probe > 0 ||
+        ifmt->read_stream_check(s, stream_index) < 0)
+        return AVERROR(ENOSYS);
+
+    if (!take_stream_packet(&si->packet_buffer, stream_index, pkt)) {
+        ret = read_stream_frame(s, stream_index, pkt);
+        if (ret < 0) {
+            av_packet_unref(pkt);
+            return ret;
+        }
+    }
+    return_packet(s, pkt);
+    return 0;
 }
 
 /**

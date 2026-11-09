@@ -2393,6 +2393,37 @@ int av_find_best_stream(AVFormatContext *ic,
 int av_read_frame(AVFormatContext *s, AVPacket *pkt);
 
 /**
+ * Return the next packet of one stream and leave every other stream as it is.
+ *
+ * The packet is the one av_read_frame() would return next for stream
+ * stream_index, with the same data, timestamps, flags and side data. The
+ * undelivered packets, parser state and demuxer position of every other
+ * stream stay as they are, and av_read_frame() returns those packets later in
+ * its usual order. A packet returned here is not returned by av_read_frame().
+ *
+ * Only the mov demuxer supports it, on seekable input. Every other demuxer
+ * returns AVERROR(ENOSYS), and so does mov on input that cannot seek, with
+ * AVFMT_FLAG_GENPTS, AVFMT_FLAG_IGNIDX or use_wallclock_as_timestamps, and for
+ * a file with IAMF, encrypted, Audible AAX or DV tracks. AVERROR(ENOSYS) comes
+ * before any state changes.
+ *
+ * @param s            media file handle
+ * @param stream_index the stream to read, which must not be discarded with
+ *                     AVDISCARD_ALL
+ * @param pkt          a blank packet, as av_packet_alloc() or
+ *                     av_packet_unref() leaves it
+ * @return 0 if OK;
+ *         AVERROR_EOF when the file holds no further packet of the stream;
+ *         AVERROR(EAGAIN) when the input has no data for now;
+ *         AVERROR(EINVAL) for a stream that does not exist or is discarded;
+ *         AVERROR(ENOSYS) as above;
+ *         another negative AVERROR code on any other error, as av_read_frame()
+ *         returns it.
+ *         On error, pkt is blank.
+ */
+int av_read_stream_packet(AVFormatContext *s, int stream_index, AVPacket *pkt);
+
+/**
  * Seek to the keyframe at timestamp.
  * 'timestamp' in 'stream_index'.
  *

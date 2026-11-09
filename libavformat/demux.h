@@ -109,6 +109,25 @@ typedef struct FFInputFormat {
     int (*read_packet)(struct AVFormatContext *, AVPacket *pkt);
 
     /**
+     * Tell whether read_stream_packet() can read stream stream_index now.
+     * It must not change any state.
+     * @return 0 if it can, AVERROR(ENOSYS) if not.
+     */
+    int (*read_stream_check)(struct AVFormatContext *, int stream_index);
+
+    /**
+     * Read the next packet of stream stream_index, the one read_packet()
+     * would return for that stream next, without changing what read_packet()
+     * returns for the other streams. Called only after read_stream_check()
+     * allowed it.
+     * @return 0 on success;
+     *         AVERROR_EOF when the file holds no further packet of the stream;
+     *         < 0 on other errors.
+     *         Upon returning an error, pkt must be unreferenced by the caller.
+     */
+    int (*read_stream_packet)(struct AVFormatContext *, int stream_index, AVPacket *pkt);
+
+    /**
      * Close the stream. The AVFormatContext and AVStreams are not
      * freed by this function
      */
