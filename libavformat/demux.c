@@ -1385,149 +1385,141 @@ fail:
 
 static int extract_extradata(FFFormatContext *si, AVStream *st, const AVPacket *pkt);
 
-static int read_frame_internal(AVFormatContext *s, AVPacket *pkt)
+/**
+ * Process pkt, which ff_read_packet() returned, for read_frame_internal().
+ *
+ * @return < 0 on error, 0 if pkt holds a packet to return, 1 if pkt was
+ *         consumed
+ */
+static int process_packet(AVFormatContext *s, AVPacket *pkt)
 {
     FormatContextInternal *const fci = ff_fc_internal(s);
     FFFormatContext *const si = &fci->fc;
+    AVStream *const st  = s->streams[pkt->stream_index];
+    FFStream *const sti = ffstream(st);
     int ret, got_packet = 0;
-    AVDictionary *metadata = NULL;
 
-    while (!got_packet && !fci->parse_queue.head) {
-        AVStream *st;
-        FFStream *sti;
+    st->event_flags |= AVSTREAM_EVENT_FLAG_NEW_PACKETS;
 
-        /* read next packet */
-        ret = ff_read_packet(s, pkt);
-        if (ret < 0) {
-            if (ret == AVERROR(EAGAIN))
+    int new_extradata = !!av_packet_side_data_get(pkt->side_data, pkt->side_data_elems,
+                                                  AV_PKT_DATA_NEW_EXTRADATA);
+    if (new_extradata)
+        sti->need_context_update = 1;
+
+    /* update context if required */
+    if (sti->need_context_update) {
+        if (avcodec_is_open(sti->avctx)) {
+            av_log(s, AV_LOG_DEBUG, "Demuxer context update while decoder is open, closing and trying to re-open\n");
+            ret = codec_close(sti);
+            sti->info->found_decoder = 0;
+            if (ret < 0)
                 return ret;
-            /* flush the parsers */
-            for (unsigned i = 0; i < s->nb_streams; i++) {
-                AVStream *const st  = s->streams[i];
-                FFStream *const sti = ffstream(st);
-                if (sti->parser && sti->need_parsing)
-                    parse_packet(s, pkt, st->index, 1);
-            }
-            /* all remaining packets are now in parse_queue =>
-             * really terminate parsing */
-            break;
         }
-        ret = 0;
-        st  = s->streams[pkt->stream_index];
-        sti = ffstream(st);
 
-        st->event_flags |= AVSTREAM_EVENT_FLAG_NEW_PACKETS;
+        /* close parser, because it depends on the codec and extradata */
+        if (sti->parser &&
+            (sti->avctx->codec_id != st->codecpar->codec_id || new_extradata)) {
+            av_parser_close(sti->parser);
+            sti->parser = NULL;
+        }
 
-        int new_extradata = !!av_packet_side_data_get(pkt->side_data, pkt->side_data_elems,
-                                                      AV_PKT_DATA_NEW_EXTRADATA);
-        if (new_extradata)
-            sti->need_context_update = 1;
+        ret = avcodec_parameters_to_context(sti->avctx, st->codecpar);
+        if (ret < 0) {
+            av_packet_unref(pkt);
+            return ret;
+        }
 
-        /* update context if required */
-        if (sti->need_context_update) {
-            if (avcodec_is_open(sti->avctx)) {
-                av_log(s, AV_LOG_DEBUG, "Demuxer context update while decoder is open, closing and trying to re-open\n");
-                ret = codec_close(sti);
-                sti->info->found_decoder = 0;
-                if (ret < 0)
-                    return ret;
-            }
+        if (!sti->avctx->extradata) {
+            sti->extract_extradata.inited = 0;
 
-            /* close parser, because it depends on the codec and extradata */
-            if (sti->parser &&
-                (sti->avctx->codec_id != st->codecpar->codec_id || new_extradata)) {
-                av_parser_close(sti->parser);
-                sti->parser = NULL;
-            }
-
-            ret = avcodec_parameters_to_context(sti->avctx, st->codecpar);
+            ret = extract_extradata(si, st, pkt);
             if (ret < 0) {
                 av_packet_unref(pkt);
                 return ret;
             }
-
-            if (!sti->avctx->extradata) {
-                sti->extract_extradata.inited = 0;
-
-                ret = extract_extradata(si, st, pkt);
-                if (ret < 0) {
-                    av_packet_unref(pkt);
-                    return ret;
-                }
-            }
-
-            sti->codec_desc = avcodec_descriptor_get(sti->avctx->codec_id);
-
-            sti->need_context_update = 0;
         }
 
-        if (pkt->pts != AV_NOPTS_VALUE &&
-            pkt->dts != AV_NOPTS_VALUE &&
-            pkt->pts < pkt->dts) {
-            av_log(s, AV_LOG_WARNING,
-                   "Invalid timestamps stream=%d, pts=%s, dts=%s, size=%d\n",
-                   pkt->stream_index,
-                   av_ts2str(pkt->pts),
-                   av_ts2str(pkt->dts),
-                   pkt->size);
-        }
-        if (s->debug & AV_FDEBUG_TS)
-            av_log(s, AV_LOG_DEBUG,
-                   "ff_read_packet stream=%d, pts=%s, dts=%s, size=%d, duration=%"PRId64", flags=%d\n",
-                   pkt->stream_index,
-                   av_ts2str(pkt->pts),
-                   av_ts2str(pkt->dts),
-                   pkt->size, pkt->duration, pkt->flags);
+        sti->codec_desc = avcodec_descriptor_get(sti->avctx->codec_id);
 
-        if (sti->need_parsing && !sti->parser && !(s->flags & AVFMT_FLAG_NOPARSE)) {
-            sti->parser = av_parser_init(st->codecpar->codec_id);
-            if (!sti->parser) {
-                av_log(s, AV_LOG_VERBOSE, "parser not found for codec "
-                       "%s, packets or times may be invalid.\n",
-                       avcodec_get_name(st->codecpar->codec_id));
-                /* no parser available: just output the raw packets */
-                sti->need_parsing = AVSTREAM_PARSE_NONE;
-            } else if (sti->need_parsing == AVSTREAM_PARSE_HEADERS)
-                sti->parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
-            else if (sti->need_parsing == AVSTREAM_PARSE_FULL_ONCE)
-                sti->parser->flags |= PARSER_FLAG_ONCE;
-            else if (sti->need_parsing == AVSTREAM_PARSE_FULL_RAW)
-                sti->parser->flags |= PARSER_FLAG_USE_CODEC_TS;
-        }
-
-        if (!sti->need_parsing || !sti->parser) {
-            /* no parsing needed: we just output the packet as is */
-            compute_pkt_fields(s, st, NULL, pkt, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
-            if ((s->iformat->flags & AVFMT_GENERIC_INDEX) &&
-                (pkt->flags & AV_PKT_FLAG_KEY) && pkt->dts != AV_NOPTS_VALUE) {
-                ff_reduce_index(s, st->index);
-                av_add_index_entry(st, pkt->pos, pkt->dts,
-                                   0, 0, AVINDEX_KEYFRAME);
-            }
-            got_packet = 1;
-        } else if (st->discard < AVDISCARD_ALL) {
-            if ((ret = parse_packet(s, pkt, pkt->stream_index, 0)) < 0)
-                return ret;
-            st->codecpar->sample_rate = sti->avctx->sample_rate;
-            st->codecpar->bit_rate = sti->avctx->bit_rate;
-            ret = av_channel_layout_copy(&st->codecpar->ch_layout, &sti->avctx->ch_layout);
-            if (ret < 0)
-                return ret;
-            st->codecpar->codec_id = sti->avctx->codec_id;
-        } else {
-            /* free packet */
-            av_packet_unref(pkt);
-        }
-        if (pkt->flags & AV_PKT_FLAG_KEY)
-            sti->skip_to_keyframe = 0;
-        if (sti->skip_to_keyframe) {
-            av_packet_unref(pkt);
-            got_packet = 0;
-        }
+        sti->need_context_update = 0;
     }
 
-    if (!got_packet && fci->parse_queue.head)
-        ret = ff_packet_list_get(&fci->parse_queue, pkt);
+    if (pkt->pts != AV_NOPTS_VALUE &&
+        pkt->dts != AV_NOPTS_VALUE &&
+        pkt->pts < pkt->dts) {
+        av_log(s, AV_LOG_WARNING,
+               "Invalid timestamps stream=%d, pts=%s, dts=%s, size=%d\n",
+               pkt->stream_index,
+               av_ts2str(pkt->pts),
+               av_ts2str(pkt->dts),
+               pkt->size);
+    }
+    if (s->debug & AV_FDEBUG_TS)
+        av_log(s, AV_LOG_DEBUG,
+               "ff_read_packet stream=%d, pts=%s, dts=%s, size=%d, duration=%"PRId64", flags=%d\n",
+               pkt->stream_index,
+               av_ts2str(pkt->pts),
+               av_ts2str(pkt->dts),
+               pkt->size, pkt->duration, pkt->flags);
+
+    if (sti->need_parsing && !sti->parser && !(s->flags & AVFMT_FLAG_NOPARSE)) {
+        sti->parser = av_parser_init(st->codecpar->codec_id);
+        if (!sti->parser) {
+            av_log(s, AV_LOG_VERBOSE, "parser not found for codec "
+                   "%s, packets or times may be invalid.\n",
+                   avcodec_get_name(st->codecpar->codec_id));
+            /* no parser available: just output the raw packets */
+            sti->need_parsing = AVSTREAM_PARSE_NONE;
+        } else if (sti->need_parsing == AVSTREAM_PARSE_HEADERS)
+            sti->parser->flags |= PARSER_FLAG_COMPLETE_FRAMES;
+        else if (sti->need_parsing == AVSTREAM_PARSE_FULL_ONCE)
+            sti->parser->flags |= PARSER_FLAG_ONCE;
+        else if (sti->need_parsing == AVSTREAM_PARSE_FULL_RAW)
+            sti->parser->flags |= PARSER_FLAG_USE_CODEC_TS;
+    }
+
+    if (!sti->need_parsing || !sti->parser) {
+        /* no parsing needed: we just output the packet as is */
+        compute_pkt_fields(s, st, NULL, pkt, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
+        if ((s->iformat->flags & AVFMT_GENERIC_INDEX) &&
+            (pkt->flags & AV_PKT_FLAG_KEY) && pkt->dts != AV_NOPTS_VALUE) {
+            ff_reduce_index(s, st->index);
+            av_add_index_entry(st, pkt->pos, pkt->dts,
+                               0, 0, AVINDEX_KEYFRAME);
+        }
+        got_packet = 1;
+    } else if (st->discard < AVDISCARD_ALL) {
+        if ((ret = parse_packet(s, pkt, pkt->stream_index, 0)) < 0)
+            return ret;
+        st->codecpar->sample_rate = sti->avctx->sample_rate;
+        st->codecpar->bit_rate = sti->avctx->bit_rate;
+        ret = av_channel_layout_copy(&st->codecpar->ch_layout, &sti->avctx->ch_layout);
+        if (ret < 0)
+            return ret;
+        st->codecpar->codec_id = sti->avctx->codec_id;
+    } else {
+        /* free packet */
+        av_packet_unref(pkt);
+    }
+    if (pkt->flags & AV_PKT_FLAG_KEY)
+        sti->skip_to_keyframe = 0;
+    if (sti->skip_to_keyframe) {
+        av_packet_unref(pkt);
+        got_packet = 0;
+    }
+    return !got_packet;
+}
+
+/**
+ * Complete what read_frame_internal() returns: ret, and pkt when ret >= 0.
+ *
+ * @return ret, or the input's error when ret is AVERROR_EOF because the input
+ *         failed
+ */
+static int finish_frame(AVFormatContext *s, AVPacket *pkt, int ret)
+{
+    FormatContextInternal *const fci = ff_fc_internal(s);
+    AVDictionary *metadata = NULL;
 
     if (ret >= 0) {
         AVStream *const st  = s->streams[pkt->stream_index];
@@ -1583,6 +1575,58 @@ static int read_frame_internal(AVFormatContext *s, AVPacket *pkt)
         ret = s->pb->error;
 
     return ret;
+}
+
+static int read_frame_internal(AVFormatContext *s, AVPacket *pkt)
+{
+    FormatContextInternal *const fci = ff_fc_internal(s);
+    int ret, got_packet = 0;
+
+    while (!got_packet && !fci->parse_queue.head) {
+        /* read next packet */
+        ret = ff_read_packet(s, pkt);
+        if (ret < 0) {
+            if (ret == AVERROR(EAGAIN))
+                return ret;
+            /* flush the parsers */
+            for (unsigned i = 0; i < s->nb_streams; i++) {
+                AVStream *const st  = s->streams[i];
+                FFStream *const sti = ffstream(st);
+                if (sti->parser && sti->need_parsing)
+                    parse_packet(s, pkt, st->index, 1);
+            }
+            /* all remaining packets are now in parse_queue =>
+             * really terminate parsing */
+            break;
+        }
+        ret = process_packet(s, pkt);
+        if (ret < 0)
+            return ret;
+        got_packet = !ret;
+    }
+
+    if (!got_packet && fci->parse_queue.head)
+        ret = ff_packet_list_get(&fci->parse_queue, pkt);
+
+    return finish_frame(s, pkt, ret);
+}
+
+/**
+ * Complete pkt, which av_read_frame() is about to return.
+ */
+static void return_packet(AVFormatContext *s, AVPacket *pkt)
+{
+    AVStream *const st = s->streams[pkt->stream_index];
+
+    if ((s->iformat->flags & AVFMT_GENERIC_INDEX) && pkt->flags & AV_PKT_FLAG_KEY) {
+        ff_reduce_index(s, st->index);
+        av_add_index_entry(st, pkt->pos, pkt->dts, 0, 0, AVINDEX_KEYFRAME);
+    }
+
+    if (is_relative(pkt->dts))
+        pkt->dts -= RELATIVE_TS_BASE;
+    if (is_relative(pkt->pts))
+        pkt->pts -= RELATIVE_TS_BASE;
 }
 
 int av_read_frame(AVFormatContext *s, AVPacket *pkt)
@@ -1666,17 +1710,7 @@ int av_read_frame(AVFormatContext *s, AVPacket *pkt)
     }
 
 return_packet:
-    st = s->streams[pkt->stream_index];
-    if ((s->iformat->flags & AVFMT_GENERIC_INDEX) && pkt->flags & AV_PKT_FLAG_KEY) {
-        ff_reduce_index(s, st->index);
-        av_add_index_entry(st, pkt->pos, pkt->dts, 0, 0, AVINDEX_KEYFRAME);
-    }
-
-    if (is_relative(pkt->dts))
-        pkt->dts -= RELATIVE_TS_BASE;
-    if (is_relative(pkt->pts))
-        pkt->pts -= RELATIVE_TS_BASE;
-
+    return_packet(s, pkt);
     return ret;
 }
 
