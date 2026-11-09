@@ -176,6 +176,23 @@ typedef struct MOVIndexRange {
     int64_t end;
 } MOVIndexRange;
 
+/**
+ * The state the samples of a stream before end are read in.
+ */
+typedef struct MOVStreamView {
+    int end;
+    int64_t duration;
+    int64_t next_root_atom;
+    unsigned int tts_count;
+    unsigned int stts_count;
+    unsigned int ctts_count;
+    unsigned int sdtp_count;
+    uint8_t *sdtp_data;
+    int sdtp_owned;
+    int dts_shift;
+    int found_tfhd;
+} MOVStreamView;
+
 typedef struct MOVStreamContext {
     AVIOContext *pb;
     int refcount;
@@ -288,6 +305,11 @@ typedef struct MOVStreamContext {
 
     struct IAMFDemuxContext *iamf;
     int iamf_stream_offset;
+
+    MOVStreamView *views;  ///< the views from views_start to nb_views, oldest first
+    unsigned int views_start;
+    unsigned int nb_views;
+    unsigned int views_allocated_size;
 } MOVStreamContext;
 
 typedef struct HEIFItemRef {
