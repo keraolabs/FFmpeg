@@ -41,7 +41,8 @@ fate-seek_utils: libavformat/tests/seek_utils$(EXESUF)
 fate-seek_utils: CMD = run libavformat/tests/seek_utils$(EXESUF)
 fate-seek_utils: CMP = null
 
-# fate-stream-read-<name> reads stream-read/<file> of the samples with libavformat/tests/stream_read.
+# fate-stream-read-<name> reads stream-read/<file> of the samples with libavformat/tests/stream_read;
+# kerao/stream_read_tests.py writes this block and the refs.
 
 FATE_STREAM_READ-$(call ALLYES, MOV_DEMUXER AC3_PARSER FILE_PROTOCOL) += fate-stream-read-interleaved-plain
 fate-stream-read-interleaved-plain: libavformat/tests/stream_read$(EXESUF)

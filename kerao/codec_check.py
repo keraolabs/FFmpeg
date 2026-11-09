@@ -29,7 +29,11 @@ CHECK_PROGRAM = ROOT / "kerao" / "codec_check.c"
 PROTOCOL = "kerao-codec-check"
 CODECS_CHECK = "codecs"
 VERSION_CHECK = "av_version_info"
-PROGRAM_CHECKS = (CODECS_CHECK, VERSION_CHECK)
+STREAM_READ_CHECK = "stream read"
+PROGRAM_CHECKS = (CODECS_CHECK, VERSION_CHECK, STREAM_READ_CHECK)
+STREAM_READ_PLAIN = "6 fd09c391 13 1743ca92 eof"
+"""The packet count and CRC of the video and the audio of kerao/stream_read_media.h as
+av_read_frame() alone reads them on n9.0.2-kerao.1, and its clean end."""
 NOT_RUN = "not run: this slice has no runner"
 NO_RESULT = "no complete result"
 
@@ -39,6 +43,7 @@ class ProgramOutput:
     version: str
     decoders: int
     codecs: frozenset[str]
+    stream_reads: tuple[str, ...]
 
 
 def load_manifest(path: Path) -> frozenset[str]:
@@ -71,6 +76,7 @@ def parse_output(console: str) -> ProgramOutput:
     """
     versions: list[str] = []
     codecs: list[str] = []
+    stream_reads: list[str] = []
     ends: list[str] = []
     for line in console.splitlines():
         prefix, _, rest = line.partition(" ")
@@ -81,6 +87,8 @@ def parse_output(console: str) -> ProgramOutput:
             versions.append(value)
         elif kind == "decoder":
             codecs.append(value.split(" ")[-1])
+        elif kind == "stream-read":
+            stream_reads.append(value)
         elif kind == "end":
             ends.append(value)
     if len(versions) != 1 or ends != [str(len(codecs))]:
@@ -89,7 +97,10 @@ def parse_output(console: str) -> ProgramOutput:
             f"and end {', '.join(ends) or 'never'}"
         )
     return ProgramOutput(
-        version=versions[0], decoders=len(codecs), codecs=frozenset(codecs)
+        version=versions[0],
+        decoders=len(codecs),
+        codecs=frozenset(codecs),
+        stream_reads=tuple(stream_reads),
     )
 
 
@@ -123,6 +134,23 @@ def check_version(version: str, release_tag: str | None) -> Check:
     )
 
 
+def stream_reads(plain: str) -> tuple[str, str]:
+    """The stream-read lines of a program whose av_read_frame() alone gives plain: the
+    stream read of the audio returns all of it and ends cleanly, and av_read_frame()
+    then returns the whole video and no audio."""
+    video, video_crc, audio, audio_crc, _ = plain.split(" ")
+    return f"plain {plain}", f"stream {audio} {audio_crc} eof {video} {video_crc} 0 eof"
+
+
+def check_stream_read(output: ProgramOutput, plain: str = STREAM_READ_PLAIN) -> Check:
+    """The program must print exactly stream_reads(plain)."""
+    expected = stream_reads(plain)
+    if output.stream_reads == expected:
+        return Check(STREAM_READ_CHECK, True, " | ".join(expected))
+    found = " | ".join(output.stream_reads) or "no stream-read line"
+    return Check(STREAM_READ_CHECK, False, f"{found}, expected {' | '.join(expected)}")
+
+
 def program_checks(
     listed: frozenset[str], console: str | None, release_tag: str | None
 ) -> list[Check]:
@@ -133,7 +161,11 @@ def program_checks(
         output = parse_output(console)
     except NoResult as error:
         return failed_program_checks(f"{NO_RESULT}: {error}")
-    return [check_codecs(listed, output), check_version(output.version, release_tag)]
+    return [
+        check_codecs(listed, output),
+        check_version(output.version, release_tag),
+        check_stream_read(output),
+    ]
 
 
 def failed_program_checks(detail: str) -> list[Check]:
@@ -205,6 +237,7 @@ def fake_program_output(codecs: frozenset[str], version: str) -> str:
     lines = [
         "uavs3d version 1.2.89",
         f"{PROTOCOL} version {version}",
+        *(f"{PROTOCOL} stream-read {line}" for line in stream_reads(STREAM_READ_PLAIN)),
         *(f"{PROTOCOL} decoder {name} {name}" for name in sorted(codecs)),
         f"{PROTOCOL} end {len(codecs)}",
     ]
@@ -337,11 +370,14 @@ def fake_program(path: Path, console: str) -> Path:
     return path
 
 
-def fake_delivered_frameworks(output: Path, slice_: Slice, work: Path) -> None:
-    """An empty framework of every library, delivered for slice_ under output."""
-    source = work / "empty.c"
-    source.write_text("")
+def fake_delivered_frameworks(
+    output: Path, slice_: Slice, work: Path, sources: dict[str, str] | None = None
+) -> None:
+    """A framework of every library, delivered for slice_ under output, built from
+    its C source in sources or else empty."""
     for name in FRAMEWORKS:
+        source = work / f"{output.name}-{name}.c"
+        source.write_text((sources or {}).get(name, ""))
         framework = delivered_framework(output, slice_, name)
         framework.mkdir(parents=True)
         capture(
@@ -401,3 +437,268 @@ def program_runs_past_the_timeout(tmp: Path) -> tuple[Check, Check]:
         return by_name(checks, f"{MACOS.identifier} {CODECS_CHECK}")
 
     return codecs(0), codecs(SLOW_START_SECONDS)
+
+
+STREAM_READ_LINE = f"{PROTOCOL} stream-read"
+
+
+def stream_read_output(lines: tuple[str, ...]) -> ProgramOutput:
+    """The program output with lines as its stream-read values."""
+    console = fake_program_output(frozenset({"h264"}), FAKE_DEV_VERSION)
+    kept = [
+        line for line in console.splitlines() if not line.startswith(STREAM_READ_LINE)
+    ]
+    kept[2:2] = [f"{STREAM_READ_LINE} {line}" for line in lines]
+    return parse_output("\n".join(kept) + "\n")
+
+
+GOOD_STREAM_READS = stream_reads(STREAM_READ_PLAIN)
+
+
+@counterexample
+def program_without_the_stream_line(tmp: Path) -> tuple[Check, Check]:
+    return (
+        check_stream_read(stream_read_output(GOOD_STREAM_READS)),
+        check_stream_read(stream_read_output(GOOD_STREAM_READS[:1])),
+    )
+
+
+@counterexample
+def stream_line_cut_short(tmp: Path) -> tuple[Check, Check]:
+    plain, stream = GOOD_STREAM_READS
+    return (
+        check_stream_read(stream_read_output(GOOD_STREAM_READS)),
+        check_stream_read(stream_read_output((plain, stream.rsplit(" ", 3)[0]))),
+    )
+
+
+@counterexample
+def plain_read_of_another_build(tmp: Path) -> tuple[Check, Check]:
+    other = stream_reads(STREAM_READ_PLAIN.replace("fd09c391", "fd09c392"))
+    return (
+        check_stream_read(stream_read_output(GOOD_STREAM_READS)),
+        check_stream_read(stream_read_output(other)),
+    )
+
+
+MOCK_HEADERS = {
+    "libavutil": {
+        "avutil.h": """\
+#include <errno.h>
+#include <stddef.h>
+#include <stdint.h>
+#define AVERROR(e) (-(e))
+#define AVERROR_EOF (-0x20464f45)
+#define AVERROR_BUG (-0x21475542)
+#define AVERROR_INVALIDDATA (-0x41444e49)
+const char *av_version_info(void);
+""",
+        "mem.h": "#include <stddef.h>\nvoid *av_malloc(size_t size);\nvoid av_free(void *ptr);\nvoid av_freep(void *ptr);\n",
+        "crc.h": """\
+#include <stddef.h>
+#include <stdint.h>
+typedef uint32_t AVCRC;
+#define AV_CRC_32_IEEE_LE 0
+const AVCRC *av_crc_get_table(int id);
+uint32_t av_crc(const AVCRC *ctx, uint32_t crc, const uint8_t *buffer, size_t length);
+""",
+    },
+    "libavcodec": {
+        "avcodec.h": """\
+#include <libavutil/avutil.h>
+typedef struct AVCodec { const char *name; int id; } AVCodec;
+typedef struct AVPacket {
+    uint8_t *data;
+    int size, stream_index, flags;
+    int64_t pts, dts, duration;
+} AVPacket;
+const AVCodec *av_codec_iterate(void **opaque);
+int av_codec_is_decoder(const AVCodec *codec);
+const char *avcodec_get_name(int id);
+AVPacket *av_packet_alloc(void);
+void av_packet_unref(AVPacket *pkt);
+void av_packet_free(AVPacket **pkt);
+""",
+    },
+    "libavformat": {
+        "avformat.h": """\
+#include <libavcodec/avcodec.h>
+#define AVSEEK_SIZE 0x10000
+#define AVSEEK_FORCE 0x20000
+typedef struct AVIOContext { unsigned char *buffer; } AVIOContext;
+typedef struct AVFormatContext { AVIOContext *pb; unsigned nb_streams; } AVFormatContext;
+AVIOContext *avio_alloc_context(unsigned char *buffer, int buffer_size, int write_flag, void *opaque,
+                                int (*read)(void *, uint8_t *, int),
+                                int (*write)(void *, const uint8_t *, int),
+                                int64_t (*seek)(void *, int64_t, int));
+void avio_context_free(AVIOContext **pb);
+AVFormatContext *avformat_alloc_context(void);
+int avformat_open_input(AVFormatContext **ps, const char *url, const void *fmt, void *options);
+void avformat_close_input(AVFormatContext **ps);
+int av_read_frame(AVFormatContext *s, AVPacket *pkt);
+int av_read_stream_packet(AVFormatContext *s, int stream_index, AVPacket *pkt);
+""",
+    },
+}
+
+MOCK_LIBAVFORMAT = """\
+#include <stdlib.h>
+#include <string.h>
+#include <libavformat/avformat.h>
+#include <libavutil/crc.h>
+#include <libavutil/mem.h>
+
+#define PACKETS 19
+
+static unsigned delivered;
+static int stream_reads;
+static uint8_t payload[PACKETS];
+
+const char *av_version_info(void) { return "n9.0.2-kerao.9-dev.1"; }
+const AVCodec *av_codec_iterate(void **opaque)
+{
+    static const AVCodec h264 = { "h264", 27 };
+    if (*opaque)
+        return NULL;
+    *opaque = (void *)&h264;
+    return &h264;
+}
+int av_codec_is_decoder(const AVCodec *codec) { return 1; }
+const char *avcodec_get_name(int id) { return "h264"; }
+void *av_malloc(size_t size) { return malloc(size); }
+void av_free(void *ptr) { free(ptr); }
+void av_freep(void *ptr) { free(*(void **)ptr); *(void **)ptr = NULL; }
+AVPacket *av_packet_alloc(void) { return calloc(1, sizeof(AVPacket)); }
+void av_packet_unref(AVPacket *pkt) { memset(pkt, 0, sizeof(*pkt)); }
+void av_packet_free(AVPacket **pkt) { free(*pkt); *pkt = NULL; }
+const AVCRC *av_crc_get_table(int id) { static const AVCRC table; return &table; }
+uint32_t av_crc(const AVCRC *ctx, uint32_t crc, const uint8_t *buffer, size_t length)
+{
+    while (length--)
+        crc = crc * 31 + *buffer++;
+    return crc;
+}
+AVIOContext *avio_alloc_context(unsigned char *buffer, int buffer_size, int write_flag, void *opaque,
+                                int (*read)(void *, uint8_t *, int),
+                                int (*write)(void *, const uint8_t *, int),
+                                int64_t (*seek)(void *, int64_t, int))
+{
+    AVIOContext *pb = calloc(1, sizeof(*pb));
+    if (pb)
+        pb->buffer = buffer;
+    return pb;
+}
+void avio_context_free(AVIOContext **pb) { free(*pb); *pb = NULL; }
+AVFormatContext *avformat_alloc_context(void) { return calloc(1, sizeof(AVFormatContext)); }
+int avformat_open_input(AVFormatContext **ps, const char *url, const void *fmt, void *options)
+{
+    delivered = 0;
+    stream_reads = 0;
+    (*ps)->nb_streams = 2;
+    return 0;
+}
+void avformat_close_input(AVFormatContext **ps) { free(*ps); *ps = NULL; }
+
+static int stream_of(int i) { return i % 3 ? 1 : 0; }
+
+static void deliver(AVPacket *pkt, int i)
+{
+    payload[i] = i;
+    pkt->data = &payload[i];
+    pkt->size = 1;
+    pkt->stream_index = stream_of(i);
+    pkt->pts = pkt->dts = i;
+    pkt->duration = 1;
+    delivered |= 1u << i;
+}
+
+int av_read_frame(AVFormatContext *s, AVPacket *pkt)
+{
+    for (int i = 0; i < PACKETS; i++)
+        if (!(delivered & 1u << i)) {
+            deliver(pkt, i);
+            return 0;
+        }
+    return AVERROR_EOF;
+}
+
+#ifdef STREAM_READ_LIMIT
+int av_read_stream_packet(AVFormatContext *s, int stream_index, AVPacket *pkt)
+{
+    if (STREAM_READ_LIMIT >= 0 && stream_reads >= STREAM_READ_LIMIT)
+        return AVERROR_EOF;
+    for (int i = 0; i < PACKETS; i++)
+        if (!(delivered & 1u << i) && stream_of(i) == stream_index) {
+            stream_reads++;
+            deliver(pkt, i);
+            return 0;
+        }
+    return AVERROR_EOF;
+}
+#endif
+"""
+EVERY_PACKET = -1
+
+
+def mock_frameworks(output: Path, slice_: Slice, work: Path, limit: int | None) -> None:
+    """Frameworks of every library delivered for slice_ under output, with MOCK_HEADERS,
+    whose libavformat is MOCK_LIBAVFORMAT: its stream read returns at most limit
+    packets, all of the stream for EVERY_PACKET, and is missing for None."""
+    for name in FRAMEWORKS:
+        framework = delivered_framework(output, slice_, name)
+        (framework / "Headers").mkdir(parents=True)
+        for header, text in MOCK_HEADERS.get(name, {}).items():
+            (framework / "Headers" / header).write_text(f"#pragma once\n{text}")
+    for name in FRAMEWORKS:
+        framework = delivered_framework(output, slice_, name)
+        source = work / f"{output.name}-{name}.c"
+        defines = f"#define STREAM_READ_LIMIT {limit}\n" if limit is not None else ""
+        source.write_text(defines + MOCK_LIBAVFORMAT if name == "libavformat" else "")
+        capture(
+            [
+                *("xcrun", "--sdk", slice_.sdk, "clang", "-dynamiclib"),
+                *("-target", slice_.target),
+                *(
+                    arg
+                    for other in FRAMEWORKS
+                    for arg in ("-F", str(delivered_framework(output, slice_, other).parent))
+                ),
+                *("-install_name", f"@rpath/{name}.framework/{name}"),
+                *("-o", str(framework / name), str(source)),
+            ]
+        )
+
+
+def mock_stream_read(tmp: Path, name: str, limit: int | None) -> Check:
+    """check_stream_read() of the check program built against mock_frameworks() with
+    limit, expecting the plain read of mock_frameworks() with EVERY_PACKET."""
+    sdk_path = Path(capture(["xcrun", "--sdk", MACOS.sdk, "--show-sdk-path"]))
+
+    def run(output: Path, limit: int | None) -> ProgramOutput:
+        mock_frameworks(output, MACOS, tmp, limit)
+        binary = compile_program(
+            MACOS, sdk_path, output, CHECK_PROGRAM, tmp / "programs" / output.name / "codec_check"
+        )
+        return parse_output(run_on_mac(binary))
+
+    plain = run(tmp / f"{name}-plain", EVERY_PACKET).stream_reads[0].removeprefix("plain ")
+    try:
+        output = run(tmp / name, limit)
+    except (BuildError, NoResult) as error:
+        return Check(STREAM_READ_CHECK, False, f"{NO_RESULT}: {' '.join(str(error).split())[:200]}")
+    return check_stream_read(output, plain)
+
+
+@counterexample
+def stream_read_ends_at_once(tmp: Path) -> tuple[Check, Check]:
+    return mock_stream_read(tmp, "good", EVERY_PACKET), mock_stream_read(tmp, "bad", 0)
+
+
+@counterexample
+def stream_read_ends_early(tmp: Path) -> tuple[Check, Check]:
+    return mock_stream_read(tmp, "good", EVERY_PACKET), mock_stream_read(tmp, "bad", 3)
+
+
+@counterexample
+def libavformat_without_the_stream_read_symbol(tmp: Path) -> tuple[Check, Check]:
+    return mock_stream_read(tmp, "good", EVERY_PACKET), mock_stream_read(tmp, "bad", None)

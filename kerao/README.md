@@ -1,6 +1,6 @@
 # kerao
 
-Builds FFmpeg's LGPL `libavutil`, `libavcodec`, `libavformat` and `libswresample` for Apple platforms. This branch holds everything a rebuild needs: the build script, the committed configure output, the codec list with its research and the required-reason API records. FFmpeg's own sources are not patched.
+Builds FFmpeg's LGPL `libavutil`, `libavcodec`, `libavformat` and `libswresample` for Apple platforms. This branch holds everything a rebuild needs: the build script, the committed configure output, the codec list with its research and the required-reason API records. It also carries one patch to FFmpeg's own sources, the [stream read](#stream-read).
 
 ## Prerequisites
 
@@ -61,7 +61,7 @@ Both modes need a checkout without a `VERSION` file, because one would override 
 | iPhone | required | optional |
 | `av_version_info()` of every slice | exactly the tag | `n9.0.2`, or `n9.0.2-` followed by anything |
 | `artifact.json` `tag` | the tag | `git describe --tags --always` |
-| `artifact.json` `unverified` | `[]` | `ios-arm64 codecs` and `ios-arm64 av_version_info` without `--device`, otherwise `[]` |
+| `artifact.json` `unverified` | `[]` | `ios-arm64 codecs`, `ios-arm64 av_version_info` and `ios-arm64 stream read` without `--device`, otherwise `[]` |
 
 core's release packaging and the libplacebo fork's `release` mode accept only `release` artifacts.
 
@@ -70,6 +70,19 @@ core's release packaging and the libplacebo fork's `release` mode accept only `r
 `--self-test` runs each check against counterexamples without building FFmpeg. Every counterexample gives the check an input it must pass and a broken copy it must fail, such as a framework with a second `LC_RPATH` or a codec list naming a codec no decoder has. It needs Xcode, but no network, Simulator or iPhone, and takes a few seconds.
 
 A check is a `check_*` function in `kerao/`, and the self-test also fails when no counterexample calls one. A new check therefore comes with a counterexample registered through `@counterexample`.
+
+## Stream read
+
+The patch adds `av_read_stream_packet()` to `libavformat`, declared in `libavformat/avformat.h` with its full contract (lavf 63.2.100, see `doc/APIchanges`). It returns the next packet of one stream, the one `av_read_frame()` would return for that stream next, and leaves the undelivered packets, parser state and demuxer position of every other stream as they are: `av_read_frame()` returns their packets later in its usual order. kerao's demux thread uses it when a decoder waits for input while the full queue of another stream holds the packet in hand. The mov demuxer supports it on seekable input, through the new `read_stream_packet()` callback of `FFInputFormat`; every other demuxer and every mode the contract leaves out returns `AVERROR(ENOSYS)` before any state changes.
+
+Its tests are the FATE tests `fate-stream-read-*` of `tests/fate/libavformat.mak`. `libavformat/tests/stream_read` reads a file from `stream-read/` of the FATE samples with a schedule of both reads, and its output must equal `tests/ref/fate/stream-read-*`. `kerao/stream_read_fixtures.py` makes each of those files, byte for byte, from `fixtures/` of keraolabs/kerao into a samples directory. `kerao/stream_read_tests.py` makes them the same way, writes the refs from plain reads of them on a build it makes of commit `ae49c6ac4a24`, `n9.0.2-kerao.1`, once it finds that commit's tree is `b4a2cbf458f4`, and records the build and the SHA-256 of every file in `kerao/stream_read_refs.txt`; it also writes the FATE tests. The tests need the samples and a native build outside the checkout:
+
+```sh
+python3 <checkout>/kerao/stream_read_fixtures.py <kerao>/fixtures <samples>
+mkdir <build> && cd <build>
+<checkout>/configure --disable-autodetect --disable-programs --disable-doc --disable-network
+make -j fate-stream-read SAMPLES=<samples>
+```
 
 ## Dependencies
 
@@ -142,7 +155,7 @@ After the build, `nm -u` and the `__objc_methname` section of every binary are m
 
 `kerao/codecs.json` lists the codecs `libavcodec` must decode, by their `avcodec_get_name()` names, grouped by media type. It comes from appendix A of `kerao/research/mpv-app-store-codecs.md`, a copy of the research on the codecs that the six mpv-based App Store players ship. The manifest also records the players, the research dates, and the codecs it leaves out with the reason for each.
 
-After packaging, the build compiles `kerao/codec_check.c` for each slice against that slice's four delivered frameworks. The program prints `av_version_info()` and the codec of every decoder `av_codec_iterate()` returns. The macOS slice runs directly, the Simulator slice runs in the booted Simulator through `xcrun simctl spawn`, and the `ios-arm64` slice runs on the iPhone in a runner app. A slice fails when any listed codec has no decoder, or when the version does not match its [mode](#modes). The summary names the decoded codecs that the list leaves out.
+After packaging, the build compiles `kerao/codec_check.c` for each slice against that slice's four delivered frameworks. The program prints `av_version_info()`, the codec of every decoder `av_codec_iterate()` returns, and how the [stream read](#stream-read) reads `kerao/stream_read_media.h`, a 0.25 s mp4 with H.264 and AAC tracks held in memory. It reads the file twice: once with `av_read_frame()` alone, and once with `av_read_stream_packet()` of the audio until it ends and then `av_read_frame()` until it ends. For each read it prints the packet count and CRC of each stream and how the read ended. The macOS slice runs directly, the Simulator slice runs in the booted Simulator through `xcrun simctl spawn`, and the `ios-arm64` slice runs on the iPhone in a runner app. A slice fails when any listed codec has no decoder, when the version does not match its [mode](#modes), or when the stream read is not right: `av_read_frame()` alone must give `STREAM_READ_PLAIN` in `kerao/codec_check.py`, the counts and CRCs it gives on `n9.0.2-kerao.1`, and the stream read must return exactly those audio packets and end cleanly, with `av_read_frame()` then returning the whole video, no audio, and ending cleanly. A slice whose headers lack the function, or whose `libavformat` does not export it, fails to compile or link and so has no result. The summary names the decoded codecs that the list leaves out.
 
 ### Runner app
 
@@ -157,7 +170,7 @@ The script assembles the app itself, without an Xcode project:
 
 ### Completion protocol
 
-A run is judged by its console output alone, and on the iPhone devicectl's exit status is never read. The check program prefixes every line it prints with `kerao-codec-check`: one `version <av_version_info()>` line, one `decoder <decoder> <codec>` line per decoder, then `end <decoder count>` last. Other lines, such as devicectl's own messages or libuavs3d's banner, are ignored. A run has a result only when the prefixed lines hold exactly one version line and one end line whose count equals the decoder lines. When a slice's output has no result, both of its checks fail with `no complete result`, and the other slices still run. That happens when the program exits or crashes before its end line, fails to compile, devicectl cannot install or launch it, or the iPhone disconnects. The app never starts a UI, so iOS kills it with signal 9 about 20 s after launch, and a program that hangs on the iPhone ends that way. A run on any slice that outlasts 120 s has no result either. The same rule decides the macOS and Simulator slices, where a program that exits nonzero has no result.
+A run is judged by its console output alone, and on the iPhone devicectl's exit status is never read. The check program prefixes every line it prints with `kerao-codec-check`: one `version <av_version_info()>` line, one `stream-read plain <video packets> <video CRC> <audio packets> <audio CRC> <end>` line, one `stream-read stream <audio packets> <audio CRC> <end> <video packets> <video CRC> <audio packets> <end>` line, one `decoder <decoder> <codec>` line per decoder, then `end <decoder count>` last. Other lines, such as devicectl's own messages or libuavs3d's banner, are ignored. A run has a result only when the prefixed lines hold exactly one version line and one end line whose count equals the decoder lines. When a slice's output has no result, all three of its checks fail with `no complete result`, and the other slices still run. That happens when the program exits or crashes before its end line, fails to compile, devicectl cannot install or launch it, or the iPhone disconnects. The app never starts a UI, so iOS kills it with signal 9 about 20 s after launch, and a program that hangs on the iPhone ends that way. A run on any slice that outlasts 120 s has no result either. The same rule decides the macOS and Simulator slices, where a program that exits nonzero has no result.
 
 `devicectl --console` does not pass the exit code back reliably. To measure this, a hand-signed app whose C `main` printed a line and then returned 0 or 3, called `_exit(5)` or `abort()`, was launched with `devicectl device process launch --console --terminate-existing --json-output <file>` (Xcode 27.0, devicectl 642.16, iPhone 17 on iOS 27.2, 2026-11-01):
 
