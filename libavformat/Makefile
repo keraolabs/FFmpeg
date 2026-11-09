@@ -781,6 +781,7 @@ TESTPROGS = id3v2                                                       \
             mkdir                                                       \
             rename                                                      \
             seek                                                        \
+            stream_read                                                 \
             url                                                         \
             seek_utils
 #           async                                                       \
