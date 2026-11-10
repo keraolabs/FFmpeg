@@ -2403,9 +2403,10 @@ int av_read_frame(AVFormatContext *s, AVPacket *pkt);
  *
  * Only the mov demuxer supports it, on seekable input. Every other demuxer
  * returns AVERROR(ENOSYS), and so does mov on input that cannot seek, with
- * AVFMT_FLAG_GENPTS, AVFMT_FLAG_IGNIDX or use_wallclock_as_timestamps, and for
- * a file with IAMF, encrypted, Audible AAX or DV tracks. AVERROR(ENOSYS) comes
- * before any state changes.
+ * AVFMT_FLAG_GENPTS, AVFMT_FLAG_IGNIDX or use_wallclock_as_timestamps, for a
+ * file with IAMF, encrypted, Audible AAX or DV audio tracks, and while
+ * s->pb->pos is 0, which makes mov read the file again from its start when it
+ * next reads a packet. AVERROR(ENOSYS) comes before any state changes.
  *
  * @param s            media file handle
  * @param stream_index the stream to read, which must not be discarded with
