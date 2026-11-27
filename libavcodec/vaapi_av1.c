@@ -195,7 +195,6 @@ static int vaapi_av1_start_frame(AVCodecContext *avctx,
             .color_range                = seq->color_config.color_range,
             .subsampling_x              = seq->color_config.subsampling_x,
             .subsampling_y              = seq->color_config.subsampling_y,
-            .chroma_sample_position     = seq->color_config.chroma_sample_position,
             .film_grain_params_present  = seq->film_grain_params_present &&
                                           !(avctx->export_side_data & AV_CODEC_EXPORT_DATA_FILM_GRAIN),
         },
@@ -431,8 +430,6 @@ static int vaapi_av1_decode_slice(AVCodecContext *avctx,
             .slice_data_flag   = VA_SLICE_DATA_FLAG_ALL,
             .tile_row          = s->tile_group_info[i].tile_row,
             .tile_column       = s->tile_group_info[i].tile_column,
-            .tg_start          = s->tg_start,
-            .tg_end            = s->tg_end,
         };
     }
 
@@ -459,6 +456,7 @@ const FFHWAccel ff_av1_vaapi_hwaccel = {
     .end_frame            = vaapi_av1_end_frame,
     .decode_slice         = vaapi_av1_decode_slice,
     .frame_priv_data_size = sizeof(VAAPIDecodePicture),
+    .free_frame_priv      = ff_vaapi_decode_free_frame_priv,
     .init                 = vaapi_av1_decode_init,
     .uninit               = vaapi_av1_decode_uninit,
     .frame_params         = ff_vaapi_common_frame_params,

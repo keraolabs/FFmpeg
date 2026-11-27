@@ -444,7 +444,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
         const int width = s->planewidth[p];
         const int mid = s->mid;
         double max_hval_log;
-        unsigned max_hval = 0;
+        unsigned max_hval = 1;
         int starty, startx;
 
         if (!((1 << k) & s->components))
@@ -480,7 +480,7 @@ static int filter_frame(AVFilterLink *inlink, AVFrame *in)
             int minh = s->histogram_size - 1, maxh = 0;
 
             if (s->slide == 2) {
-                s->x_pos = out->width - 1;
+                s->x_pos = s->width - 1;
                 for (j = 0; j < outlink->h; j++) {
                     memmove(out->data[p] + j * out->linesize[p] ,
                             out->data[p] + j * out->linesize[p] + bpp,

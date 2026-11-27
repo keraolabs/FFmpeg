@@ -177,6 +177,7 @@ static av_cold int apv_decode_close(AVCodecContext *avctx)
 {
     APVDecodeContext *apv = avctx->priv_data;
 
+    av_refstruct_unref(&apv->hwaccel_picture_private);
     ff_cbs_fragment_free(&apv->au);
     ff_cbs_close(&apv->cbc);
 
@@ -361,6 +362,12 @@ static int apv_decode(AVCodecContext *avctx, AVFrame *output,
     APVDerivedTileInfo           *tile_info = &apv->tile_info;
     int err, job_count;
 
+    if (!ff_thread_can_start_frame(avctx)) {
+        av_log(avctx, AV_LOG_ERROR, "Multiple primary frames in a packet "
+               "are not supported with frame threading.\n");
+        return AVERROR_PATCHWELCOME;
+    }
+
     err = apv_decode_check_format(avctx, &input->frame_header);
     if (err < 0) {
         av_log(avctx, AV_LOG_ERROR, "Unsupported format parameters.\n");
@@ -383,11 +390,10 @@ static int apv_decode(AVCodecContext *avctx, AVFrame *output,
 
     apv_derive_tile_info(tile_info, &input->frame_header);
 
-    if (avctx->hwaccel) {
-        err = ff_hwaccel_frame_priv_alloc(avctx, &apv->hwaccel_picture_private);
-        if (err < 0)
-            return err;
-    }
+    av_refstruct_unref(&apv->hwaccel_picture_private);
+    err = ff_hwaccel_frame_priv_alloc(avctx, &apv->hwaccel_picture_private);
+    if (err < 0)
+        return err;
 
     ff_thread_finish_setup(avctx);
 
@@ -515,6 +521,7 @@ static int apv_receive_frame_internal(AVCodecContext *avctx, AVFrame *frame)
         switch (pbu->type) {
         case APV_PBU_PRIMARY_FRAME:
             err = apv_decode(avctx, frame, pbu->content);
+            frame->pkt_dts = apv->pkt->dts;
             i++;
             goto end;
         case APV_PBU_METADATA:

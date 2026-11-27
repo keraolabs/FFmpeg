@@ -122,7 +122,7 @@ def check_codecs(listed: frozenset[str], output: ProgramOutput) -> Check:
 
 
 def check_version(version: str, release_tag: str | None) -> Check:
-    """A release build must report exactly release_tag; a dev build (None) any n9.0.2 describe."""
+    """A release build must report exactly release_tag; a dev build (None) any n9.1 describe."""
     if release_tag is not None:
         expected = release_tag
         ok = version == release_tag
@@ -244,8 +244,8 @@ def fake_program_output(codecs: frozenset[str], version: str) -> str:
     return "\n".join(lines) + "\n"
 
 
-FAKE_VERSION = "n9.0.2-kerao.1"
-FAKE_DEV_VERSION = "n9.0.2-6-g1976b53c6c"
+FAKE_VERSION = "n9.1-kerao.1"
+FAKE_DEV_VERSION = "n9.1-6-g1976b53c6c"
 NO_SUCH_CODEC = "kerao_no_such_codec"
 
 
@@ -554,7 +554,7 @@ static unsigned delivered;
 static int stream_reads;
 static uint8_t payload[PACKETS];
 
-const char *av_version_info(void) { return "n9.0.2-kerao.9-dev.1"; }
+const char *av_version_info(void) { return "n9.1-kerao.9-dev.1"; }
 const AVCodec *av_codec_iterate(void **opaque)
 {
     static const AVCodec h264 = { "h264", 27 };

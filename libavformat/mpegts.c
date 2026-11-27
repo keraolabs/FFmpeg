@@ -129,6 +129,7 @@ struct StreamGroup {
     AVStream *streams[MAX_STREAMS_PER_PROGRAM];
 };
 
+/* Keep program_swap() in sync when adding fields. */
 struct Program {
     unsigned int id; // program id/service id
     unsigned int nb_pids;
@@ -140,6 +141,13 @@ struct Program {
 
     /** have we found pmt for this program */
     int pmt_found;
+};
+
+/* Subset of struct Program needed by find_matching_stream().  Keeping this
+ * small avoids a ~131 KiB stack frame in pmt_cb(). */
+struct ProgramStreams {
+    unsigned int nb_streams;
+    struct Stream streams[MAX_STREAMS_PER_PROGRAM];
 };
 
 struct MpegTSContext {
@@ -330,6 +338,31 @@ static void clear_program(struct Program *p)
     p->nb_stream_groups = 0;
     memset(p->stream_groups, 0, sizeof(p->stream_groups));
     p->pmt_found = 0;
+}
+
+/* Swap two programs without a struct Program-sized stack temporary. */
+static void program_swap(struct Program *a, struct Program *b)
+{
+    int n;
+
+    FFSWAP(unsigned int, a->id, b->id);
+
+    n = FFMAX(a->nb_pids, b->nb_pids);
+    FFSWAP(unsigned int, a->nb_pids, b->nb_pids);
+    for (int i = 0; i < n; i++)
+        FFSWAP(unsigned int, a->pids[i], b->pids[i]);
+
+    n = FFMAX(a->nb_streams, b->nb_streams);
+    FFSWAP(unsigned int, a->nb_streams, b->nb_streams);
+    for (int i = 0; i < n; i++)
+        FFSWAP(struct Stream, a->streams[i], b->streams[i]);
+
+    n = FFMAX(a->nb_stream_groups, b->nb_stream_groups);
+    FFSWAP(unsigned int, a->nb_stream_groups, b->nb_stream_groups);
+    for (int i = 0; i < n; i++)
+        FFSWAP(struct StreamGroup, a->stream_groups[i], b->stream_groups[i]);
+
+    FFSWAP(int, a->pmt_found, b->pmt_found);
 }
 
 static void clear_programs(MpegTSContext *ts)
@@ -600,7 +633,7 @@ static void mpegts_close_filter(MpegTSContext *ts, MpegTSFilter *filter)
         av_buffer_unref(&pes->buffer);
         /* referenced private data will be freed later in
          * avformat_close_input (pes->st->priv_data == pes) */
-        if (!pes->st || pes->merged_st || !pes->st->priv_data) {
+        if (!pes->st || pes->st->priv_data != pes) {
             av_freep(&filter->u.pes_filter.opaque);
         }
     }
@@ -1051,7 +1084,7 @@ static int timed_id3_update_metadata(AVStream *s, AVPacket *pkt)
     int ret = 0;
 
     ffio_init_read_context(&id3_buf, pkt->data, pkt->size);
-    ff_id3v2_read_dict(&id3_buf.pub, &metadata, ID3v2_DEFAULT_MAGIC, &extra_meta);
+    ff_id3v2_read_dict(NULL, &id3_buf.pub, &metadata, ID3v2_DEFAULT_MAGIC, &extra_meta);
     ret = ff_id3v2_parse_priv_dict(&metadata, extra_meta);
     ff_id3v2_free_extra_meta(&extra_meta);
 
@@ -2545,7 +2578,8 @@ int ff_parse_mpeg2_descriptor(AVFormatContext *fc, AVStream *st, int stream_type
 }
 
 static AVStream *find_matching_stream(MpegTSContext *ts, int pid, unsigned int programid,
-                                      int stream_identifier, int pmt_stream_idx, struct Program *p)
+                                      int stream_identifier, int pmt_stream_idx,
+                                      const struct ProgramStreams *p)
 {
     AVFormatContext *s = ts->stream;
     AVStream *found = NULL;
@@ -2720,7 +2754,7 @@ static void create_stream_groups(MpegTSContext *ts, struct Program *prg)
             switch (grp->type) {
             case AV_STREAM_GROUP_PARAMS_LCEVC:
                 if (grp->streams[j]->codecpar->codec_id == AV_CODEC_ID_LCEVC)
-                    stg->params.layered_video->el_index = stg->nb_streams - 1;
+                    stg->params.layered_video->el_index = stg->nb_entries - 1;
                 break;
             case AV_STREAM_GROUP_PARAMS_DOLBY_VISION:
                 if (j == 0) {
@@ -2728,7 +2762,7 @@ static void create_stream_groups(MpegTSContext *ts, struct Program *prg)
                     stg->params.layered_video->height = grp->streams[j]->codecpar->height;
                 }
                 if (j == grp->nb_streams - 1)
-                    stg->params.layered_video->el_index = stg->nb_streams - 1;
+                    stg->params.layered_video->el_index = stg->nb_entries - 1;
                 break;
             default:
                 av_unreachable("Invalid group type!");
@@ -2741,7 +2775,7 @@ static void pmt_cb(MpegTSFilter *filter, const uint8_t *section, int section_len
 {
     MpegTSContext *ts = filter->u.section_filter.opaque;
     MpegTSSectionFilter *tssf = &filter->u.section_filter;
-    struct Program old_program;
+    struct ProgramStreams old_program;
     SectionHeader h1, *h = &h1;
     PESContext *pes;
     AVStream *st;
@@ -2777,15 +2811,15 @@ static void pmt_cb(MpegTSFilter *filter, const uint8_t *section, int section_len
         return;
 
     prg = get_program(ts, h->id);
-    if (prg)
-        old_program = *prg;
-    else
-        clear_program(&old_program);
-
     if (ts->skip_unknown_pmt && !prg)
         return;
     if (prg && prg->nb_pids && prg->pids[0] != ts->current_pid)
         return;
+    old_program.nb_streams = prg ? prg->nb_streams : 0;
+    if (old_program.nb_streams)
+        memcpy(old_program.streams, prg->streams,
+               old_program.nb_streams * sizeof(*old_program.streams));
+
     if (!ts->skip_clear)
         clear_avprogram(ts, h->id);
     clear_program(prg);
@@ -3033,7 +3067,7 @@ static void pat_cb(MpegTSFilter *filter, const uint8_t *section, int section_len
                     clear_program(prg);
                 add_pid_to_program(prg, pmt_pid);
                 if (prg_idx > nb_prg)
-                    FFSWAP(struct Program, ts->prg[nb_prg], ts->prg[prg_idx]);
+                    program_swap(&ts->prg[nb_prg], &ts->prg[prg_idx]);
                 if (prg_idx >= nb_prg)
                     nb_prg++;
             } else
@@ -3497,8 +3531,6 @@ static int mpegts_probe(const AVProbeData *p)
 
     if        (check_count > CHECK_COUNT && sumscore > 6) {
         return AVPROBE_SCORE_MAX   + sumscore - CHECK_COUNT;
-    } else if (check_count >= CHECK_COUNT && sumscore >= CHECK_COUNT) {
-        return AVPROBE_SCORE_MAX   + sumscore - CHECK_COUNT;
     } else if (check_count >= CHECK_COUNT && sumscore > 6) {
         return AVPROBE_SCORE_MAX/2 + sumscore - CHECK_COUNT;
     } else if (check_count >= CHECK_COUNT && maxscore > 6) {
@@ -3673,8 +3705,9 @@ static int mpegts_raw_read_packet(AVFormatContext *s, AVPacket *pkt)
             /* we read the next PCR (XXX: optimize it by using a bigger buffer */
             pos = avio_tell(s->pb);
             for (i = 0; i < MAX_PACKET_READAHEAD; i++) {
-                avio_seek(s->pb, pos + i * ts->raw_packet_size, SEEK_SET);
-                avio_read(s->pb, pcr_buf, 12);
+                if (avio_seek(s->pb, pos + i * ts->raw_packet_size, SEEK_SET) < 0 ||
+                    avio_read(s->pb, pcr_buf, sizeof(pcr_buf)) != sizeof(pcr_buf))
+                    break;
                 if (parse_pcr(&next_pcr_h, &next_pcr_l, pcr_buf) == 0) {
                     /* XXX: not precise enough */
                     ts->pcr_incr =

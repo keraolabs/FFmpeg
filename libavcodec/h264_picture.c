@@ -44,9 +44,9 @@ void ff_h264_unref_picture(H264Picture *pic)
     if (!pic->f || !pic->f->buf[0])
         return;
 
+    av_refstruct_unref(&pic->hwaccel_picture_private);
     ff_thread_release_ext_buffer(&pic->tf);
     av_frame_unref(pic->f_grain);
-    av_refstruct_unref(&pic->hwaccel_picture_private);
 
     av_refstruct_unref(&pic->qscale_table_base);
     av_refstruct_unref(&pic->mb_type_base);
@@ -70,9 +70,6 @@ static void h264_copy_picture_params(H264Picture *dst, const H264Picture *src)
         av_refstruct_replace(&dst->motion_val_base[i], src->motion_val_base[i]);
         av_refstruct_replace(&dst->ref_index[i],       src->ref_index[i]);
     }
-
-    av_refstruct_replace(&dst->hwaccel_picture_private,
-                          src->hwaccel_picture_private);
 
     av_refstruct_replace(&dst->decode_error_flags, src->decode_error_flags);
 
@@ -117,6 +114,8 @@ int ff_h264_ref_picture(H264Picture *dst, const H264Picture *src)
     ret = ff_thread_ref_frame(&dst->tf, &src->tf);
     if (ret < 0)
         goto fail;
+    av_refstruct_replace(&dst->hwaccel_picture_private,
+                          src->hwaccel_picture_private);
 
     if (src->needs_fg) {
         ret = av_frame_ref(dst->f_grain, src->f_grain);
@@ -144,6 +143,8 @@ int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src)
     av_assert0(src->tf.f == src->f);
 
     dst->tf.f = dst->f;
+    av_refstruct_replace(&dst->hwaccel_picture_private,
+                          src->hwaccel_picture_private);
     ret = ff_thread_replace_frame(&dst->tf, &src->tf);
     if (ret < 0)
         goto fail;
@@ -159,6 +160,7 @@ int ff_h264_replace_picture(H264Picture *dst, const H264Picture *src)
 
     return 0;
 fail:
+    av_refstruct_unref(&dst->hwaccel_picture_private);
     ff_h264_unref_picture(dst);
     return ret;
 }
@@ -218,8 +220,9 @@ int ff_h264_field_end(H264Context *h, H264SliceContext *sl, int in_setup)
         if (err < 0) {
             av_log(h->avctx, AV_LOG_WARNING, "Failed synthesizing film "
                    "grain, ignoring: %s\n", av_err2str(err));
-            cur->needs_fg = 0;
-            err = 0;
+            /* other threads may already hold a reference with needs_fg set,
+             * so output the decoded picture through the grain buffer */
+            err = av_frame_copy(cur->f_grain, cur->f);
         }
     }
 

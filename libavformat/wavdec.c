@@ -323,17 +323,25 @@ static int wav_parse_bext_tag(AVFormatContext *s, int64_t size)
 
     if (size > 602) {
         /* CodingHistory present */
-        size -= 602;
+        int64_t coding_history_size = size - 602;
 
-        if (!(coding_history = av_malloc(size + 1)))
+        /* Professional BEXT coding history rarely exceeds a few KB.
+         * Cap to 1MB to prevent excessive allocation from crafted files
+         * while remaining well within ffio_read_size's int range. */
+        if (coding_history_size > 1024 * 1024) {
+            av_log(s, AV_LOG_ERROR, "BEXT coding history too large (%"PRId64")\n", coding_history_size);
+            return AVERROR_INVALIDDATA;
+        }
+
+        if (!(coding_history = av_malloc(coding_history_size + 1)))
             return AVERROR(ENOMEM);
 
-        if ((ret = ffio_read_size(s->pb, coding_history, size)) < 0) {
+        if ((ret = ffio_read_size(s->pb, coding_history, coding_history_size)) < 0) {
             av_free(coding_history);
             return ret;
         }
 
-        coding_history[size] = 0;
+        coding_history[coding_history_size] = 0;
         if ((ret = av_dict_set(&s->metadata, "coding_history", coding_history,
                                AV_DICT_DONT_STRDUP_VAL)) < 0)
             return ret;
@@ -362,11 +370,13 @@ static int wav_read_header(AVFormatContext *s)
     WAVDemuxContext *wav = s->priv_data;
     int ret, got_fmt = 0, got_xma2 = 0;
     int64_t next_tag_ofs, data_ofs = -1;
+    int64_t filesize;
 
     wav->unaligned = avio_tell(s->pb) & 1;
 
     wav->smv_data_ofs = -1;
 
+    filesize = avio_size(pb);
     /* read chunk ID */
     tag = avio_rl32(pb);
     switch (tag) {
@@ -458,7 +468,7 @@ static int wav_read_header(AVFormatContext *s)
 
             if (rf64 || bw64) {
                 wav->data_end = av_sat_add64(avio_tell(pb), data_size);
-                next_tag_ofs = wav->data_end + (data_size & 1);
+                next_tag_ofs = av_sat_add64(wav->data_end, data_size & 1);
             } else if (size > 0 && size != 0xFFFFFFFF) {
                 data_size    = size;
                 wav->data_end = avio_tell(pb) + size;
@@ -653,7 +663,7 @@ break_loop:
         if (   st->codecpar->ch_layout.nb_channels
             && data_size
             && av_get_bits_per_sample(st->codecpar->codec_id)
-            && wav->data_end <= avio_size(pb))
+            && wav->data_end <= filesize)
             sample_count = (data_size << 3)
                                   /
                 (st->codecpar->ch_layout.nb_channels * (uint64_t)av_get_bits_per_sample(st->codecpar->codec_id));
@@ -852,6 +862,7 @@ const FFInputFormat ff_wav_demuxer = {
     .p.codec_tag    = ff_wav_codec_tags_list,
     .p.priv_class   = &wav_demuxer_class,
     .priv_data_size = sizeof(WAVDemuxContext),
+    .flags_internal = FF_INFMT_FLAG_ID3V2_AUTO,
     .read_probe     = wav_probe,
     .read_header    = wav_read_header,
     .read_packet    = wav_read_packet,
@@ -1023,7 +1034,6 @@ const FFInputFormat ff_w64_demuxer = {
     .p.codec_tag    = ff_wav_codec_tags_list,
     .p.priv_class   = &w64_demuxer_class,
     .priv_data_size = sizeof(WAVDemuxContext),
-    .flags_internal = FF_INFMT_FLAG_ID3V2_AUTO,
     .read_probe     = w64_probe,
     .read_header    = w64_read_header,
     .read_packet    = wav_read_packet,

@@ -49,16 +49,21 @@ static void process(const SwsOpExec *exec, const void *priv,
         uint8_t *out = exec->out[i];
         const int idx = p->index[i];
         const int bytes = x_end * exec->block_size_out[i];
-        const int use_loop = exec->out_stride[i] > bytes + SWS_MAX_PADDING;
+        const int use_loop = exec->out_stride[i] < 0 ||
+                             exec->out_stride[i] > bytes + SWS_MAX_PADDING;
+        const size_t span = (size_t) (lines - 1) * exec->out_stride[i] + bytes;
         if (idx < 0 && !use_loop) {
-            memset(out, p->clear_value[i], exec->out_stride[i] * lines);
+            memset(out, p->clear_value[i], span);
         } else if (idx < 0) {
             for (int y = y_start; y < y_end; y++) {
                 memset(out, p->clear_value[i], bytes);
                 out += exec->out_stride[i];
             }
+        } else if (out == exec->in[idx]) {
+            av_assert1(exec->out_stride[i] == exec->in_stride[idx]);
+            continue; /* plane was already ref'd */
         } else if (exec->out_stride[i] == exec->in_stride[idx] && !use_loop) {
-            memcpy(out, exec->in[idx], exec->out_stride[i] * lines);
+            memcpy(out, exec->in[idx], span);
         } else {
             const uint8_t *in = exec->in[idx];
             for (int y = y_start; y < y_end; y++) {
@@ -109,7 +114,7 @@ static int compile(SwsContext *ctx, const SwsOpList *ops, SwsCompiledOp *out)
                  * can't memset on multi-byte sequences */
                 uint8_t val = op->clear.value[i].num & 0xFF;
                 uint32_t ref = val;
-                switch (ff_sws_pixel_type_size(op->type)) {
+                switch (ff_sws_pixel_type_size(op->clear.type[i])) {
                 case 2: ref *= 0x101; break;
                 case 4: ref *= 0x1010101; break;
                 }

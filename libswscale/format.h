@@ -162,6 +162,12 @@ int ff_test_fmt(SwsBackend backends, const SwsFormat *fmt, int output);
 bool ff_infer_colors(SwsColor *src, SwsColor *dst);
 
 /**
+ * Infers an unspecified chroma location of a subsampled format from the
+ * other format. Returns true if a location was inferred, false otherwise.
+ */
+bool ff_infer_chroma_loc(SwsFormat *src, SwsFormat *dst);
+
+/**
  * Wrapper around av_chroma_location_enum_to_pos() that accounts for
  * the per-field offset introduced by interlacing.
  */
@@ -169,45 +175,17 @@ void ff_sws_chroma_pos(const SwsFormat *fmt, bool *incomplete,
                        int *out_xpos, int *out_ypos);
 
 typedef struct SwsOpList SwsOpList;
-typedef enum SwsPixelType SwsPixelType;
+typedef struct SwsLut3D SwsLut3D;
 
 /**
- * Append a set of operations for decoding/encoding raw pixels. This will
- * handle input read/write, swizzling, shifting and byte swapping.
- *
- * Returns 0 on success, or a negative error code on failure.
- */
-int ff_sws_decode_pixfmt(SwsOpList *ops, const SwsFormat *fmt);
-int ff_sws_encode_pixfmt(SwsOpList *ops, const SwsFormat *fmt);
-
-/**
- * Append a set of operations for transforming decoded pixel values to/from
- * normalized RGB in the specified gamut and pixel type.
- *
- * Returns 0 on success, or a negative error code on failure.
- */
-int ff_sws_decode_colors(SwsContext *ctx, SwsPixelType type, SwsOpList *ops,
-                         const SwsFormat *fmt, bool *incomplete);
-int ff_sws_encode_colors(SwsContext *ctx, SwsPixelType type, SwsOpList *ops,
-                         const SwsFormat *src, const SwsFormat *dst,
-                         bool *incomplete);
-
-/**
- * Append a set of operations for scaling pixels to a different resolution.
- *
- * Returns 0 on success, or a negative error code on failure.
- */
-int ff_sws_add_filters(SwsContext *ctx, SwsPixelType type, SwsOpList *ops,
-                       const SwsFormat *src, const SwsFormat *dst);
-
-/**
- * Generate an SwsOpList defining a conversion from `src` to `dst`.
+ * Generate an SwsOpList defining a conversion from `src` to `dst`, with an
+ * optional 3DLUT for converting between gamuts.
  *
  * Returns 0 on success, or a negative error code on failure.
  */
 int ff_sws_op_list_generate(SwsContext *ctx, const SwsFormat *src,
-                            const SwsFormat *dst, SwsOpList **out_ops,
-                            bool *incomplete);
+                            const SwsFormat *dst, const SwsLut3D *lut3d,
+                            SwsOpList **out_ops, bool *incomplete);
 
 /**
  * Represents a view into a single field of frame data.
@@ -231,6 +209,12 @@ typedef struct SwsFrame {
      */
     int width, height;
     enum AVPixelFormat format;
+
+    /**
+     * Number of bytes after the last pixel of each line that may be read
+     * (input frames) or written (output frames).
+     */
+    int padding[4];
 
     /**
      * Pointer to the original AVFrame, if there is a 1:1 correspondence.

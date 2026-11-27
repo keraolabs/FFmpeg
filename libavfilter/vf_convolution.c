@@ -494,16 +494,17 @@ static void filter_column(uint8_t *dst, int height,
                           int dstride, int stride, int size)
 {
     DECLARE_ALIGNED(64, unsigned, sum)[16];
+    const int width = FFMIN(16, size);
 
     for (int y = 0; y < height; y++) {
         memset(sum, 0, sizeof(sum));
 
         for (int i = 0; i < 2 * radius + 1; i++) {
-            for (int off16 = 0; off16 < 16; off16++)
+            for (int off16 = 0; off16 < width; off16++)
                 sum[off16] += (unsigned)c[i][0 + y * stride + off16] * matrix[i];
         }
 
-        for (int off16 = 0; off16 < 16; off16++) {
+        for (int off16 = 0; off16 < width; off16++) {
             dst[off16] = av_clip_uint8((int)sum[off16] * rdiv + bias + 0.5f);
         }
         dst += dstride;
@@ -569,7 +570,7 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
     int plane;
 
     for (plane = 0; plane < s->nb_planes; plane++) {
-        const int mode = s->mode[plane];
+        const int mode = s->active_mode[plane];
         const int bpc = s->bpc;
         const int radius = s->size[plane] / 2;
         const int height = s->planeheight[plane];
@@ -612,12 +613,12 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
                 s->setup[plane](radius, c, src, stride, x, width, y, height, bpc);
                 s->filter[plane](dst + yoff + xoff, 1, rdiv,
                                  bias, matrix, c, s->max, radius,
-                                 dstride, stride, slice_end - step);
+                                 dstride, stride, slice_end - y);
             }
             s->setup[plane](radius, c, src, stride, left, width, y, height, bpc);
             s->filter[plane](dst + yoff + xoff, right - left,
                              rdiv, bias, matrix, c, s->max, radius,
-                             dstride, stride, slice_end - step);
+                             dstride, stride, slice_end - y);
             for (x = right; x < sizew; x++) {
                 const int xoff = mode == MATRIX_COLUMN ? (y - slice_start) * bpc : x * bpc;
                 const int yoff = mode == MATRIX_COLUMN ? x * dstride : 0;
@@ -625,7 +626,7 @@ static int filter_slice(AVFilterContext *ctx, void *arg, int jobnr, int nb_jobs)
                 s->setup[plane](radius, c, src, stride, x, width, y, height, bpc);
                 s->filter[plane](dst + yoff + xoff, 1, rdiv,
                                  bias, matrix, c, s->max, radius,
-                                 dstride, stride, slice_end - step);
+                                 dstride, stride, slice_end - y);
             }
             if (mode != MATRIX_COLUMN)
                 dst += dstride;
@@ -684,44 +685,34 @@ static int param_init(AVFilterContext *ctx)
             }
 
             if (s->mode[i] == MATRIX_ROW) {
+                s->copy[i] = 0;
                 s->filter[i] = filter_row;
                 s->setup[i] = setup_row;
                 s->size[i] = s->matrix_length[i];
             } else if (s->mode[i] == MATRIX_COLUMN) {
+                s->copy[i] = 0;
                 s->filter[i] = filter_column;
                 s->setup[i] = setup_column;
                 s->size[i] = s->matrix_length[i];
             } else if (s->matrix_length[i] == 9) {
                 s->size[i] = 3;
-
-                if (!memcmp(matrix, same3x3, sizeof(same3x3))) {
-                    s->copy[i] = 1;
-                } else {
-                    s->filter[i] = filter_3x3;
-                    s->copy[i] = 0;
-                }
+                s->filter[i] = filter_3x3;
+                s->copy[i] = !memcmp(matrix, same3x3, sizeof(same3x3));
                 s->setup[i] = setup_3x3;
             } else if (s->matrix_length[i] == 25) {
                 s->size[i] = 5;
-                if (!memcmp(matrix, same5x5, sizeof(same5x5))) {
-                    s->copy[i] = 1;
-                } else {
-                    s->filter[i] = filter_5x5;
-                    s->copy[i] = 0;
-                }
+                s->filter[i] = filter_5x5;
+                s->copy[i] = !memcmp(matrix, same5x5, sizeof(same5x5));
                 s->setup[i] = setup_5x5;
             } else if (s->matrix_length[i] == 49) {
                 s->size[i] = 7;
-                if (!memcmp(matrix, same7x7, sizeof(same7x7))) {
-                    s->copy[i] = 1;
-                } else {
-                    s->filter[i] = filter_7x7;
-                    s->copy[i] = 0;
-                }
+                s->filter[i] = filter_7x7;
+                s->copy[i] = !memcmp(matrix, same7x7, sizeof(same7x7));
                 s->setup[i] = setup_7x7;
             } else {
                 return AVERROR(EINVAL);
             }
+            s->active_mode[i] = s->mode[i];
 
             if (sum == 0)
                 sum = 1;
@@ -730,6 +721,19 @@ static int param_init(AVFilterContext *ctx)
 
             if (s->copy[i] && (s->rdiv[i] != 1. || s->bias[i] != 0.))
                 s->copy[i] = 0;
+
+            if (s->depth > 8) {
+                if (s->mode[i] == MATRIX_ROW)
+                    s->filter[i] = filter16_row;
+                else if (s->mode[i] == MATRIX_COLUMN)
+                    s->filter[i] = filter16_column;
+                else if (s->size[i] == 3)
+                    s->filter[i] = filter16_3x3;
+                else if (s->size[i] == 5)
+                    s->filter[i] = filter16_5x5;
+                else if (s->size[i] == 7)
+                    s->filter[i] = filter16_7x7;
+            }
         }
     } else if (!strcmp(ctx->filter->name, "prewitt")) {
         for (i = 0; i < 4; i++) {
@@ -774,20 +778,6 @@ static int param_init(AVFilterContext *ctx)
     }
 
     if (!strcmp(ctx->filter->name, "convolution")) {
-        if (s->depth > 8) {
-            for (p = 0; p < s->nb_planes; p++) {
-                if (s->mode[p] == MATRIX_ROW)
-                    s->filter[p] = filter16_row;
-                else if (s->mode[p] == MATRIX_COLUMN)
-                    s->filter[p] = filter16_column;
-                else if (s->size[p] == 3)
-                    s->filter[p] = filter16_3x3;
-                else if (s->size[p] == 5)
-                    s->filter[p] = filter16_5x5;
-                else if (s->size[p] == 7)
-                    s->filter[p] = filter16_7x7;
-            }
-        }
 #if CONFIG_CONVOLUTION_FILTER && ARCH_X86_64 && HAVE_X86ASM
         ff_convolution_init_x86(s);
 #endif

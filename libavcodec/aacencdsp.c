@@ -16,10 +16,12 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#include <float.h>
 #include <math.h>
 
 #include "config.h"
 
+#include "libavutil/common.h"
 #include "libavutil/macros.h"
 #include "aacencdsp.h"
 
@@ -45,10 +47,39 @@ static void quantize_bands(int *out, const float *in, const float *scaled,
     }
 }
 
+/* One NMR scalefactor-trellis Viterbi step, for each current-band candidate, find the
+ * previous-band candidate minimising dpp[op] + lamsf[d] then set
+ * dp[o] = node[o] + that cost and record the back-pointer bp[o] */
+static void nmr_trellis_step_c(float *dp, uint8_t *bp, const float *dpp,
+                               const float *node, const float *lamsf,
+                               int n_cur, int n_prev, int base, int step, int mdiff)
+{
+    /* d = base + (o - op) * step lies in [-mdiff, mdiff] for op in [o - dlo, o + dhi] */
+    const int dlo = FFUDIV(mdiff - base, step);
+    const int dhi = FFUDIV(mdiff + base, step);
+
+    for (int o = 0; o < n_cur; o++) {
+        const int op_end = FFMIN(n_prev, o + dhi + 1);
+        const int edge   = base + o * step + mdiff;
+        int best = -1;
+        float bestc = FLT_MAX;
+        for (int op = FFMAX(0, o - dlo); op < op_end; op++) {
+            float c = dpp[op] + lamsf[edge - op * step];
+            if (c < bestc) {
+                bestc = c;
+                best  = op;
+            }
+        }
+        bp[o] = best < 0 ? 0 : best;
+        dp[o] = best < 0 ? FLT_MAX : node[o] + bestc;
+    }
+}
+
 void ff_aacenc_dsp_init(AACEncDSPContext *s)
 {
-    s->abs_pow34   = abs_pow34_v;
-    s->quant_bands = quantize_bands;
+    s->abs_pow34        = abs_pow34_v;
+    s->quant_bands      = quantize_bands;
+    s->nmr_trellis_step = nmr_trellis_step_c;
 
 #if ARCH_RISCV
     ff_aacenc_dsp_init_riscv(s);

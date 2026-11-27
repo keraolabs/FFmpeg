@@ -23,6 +23,7 @@
 #include "libswscale/ops.h"
 #include "libswscale/ops_dispatch.h"
 #include "libswscale/ops_internal.h"
+#include "libswscale/op_list_gen_template.c"
 #include "libswscale/format.h"
 
 #ifdef _WIN32
@@ -38,7 +39,10 @@ static int print_ops(SwsContext *ctx, const SwsOpList *ops, SwsCompiledOp *out)
     if (!uops)
         return AVERROR(ENOMEM);
 
-    int ret = ff_sws_ops_translate(ctx, ops, 0, uops);
+    const SwsUOpFlags flags = SWS_UOP_FLAG_EXPAND_BIT
+                            | SWS_UOP_FLAG_READ_PALETTE
+                            | SWS_UOP_FLAG_ADD;
+    int ret = ff_sws_ops_translate(ctx, ops, flags, uops);
     if (ret == AVERROR(ENOTSUP))
         goto fail;
 
@@ -110,7 +114,6 @@ int main(int argc, char **argv)
     enum AVPixelFormat dst_fmt = AV_PIX_FMT_NONE;
     SwsContext *ctx = NULL;
     SwsGraph *graph = NULL;
-    bool macros_gen = false;
     int ret = 1;
 
 #ifdef _WIN32
@@ -129,8 +132,6 @@ int main(int argc, char **argv)
                     "       Only test the specified source pixel format\n"
                     "   -v <level>\n"
                     "       Enable log verbosity at given level\n"
-                    "   -macros\n"
-                    "       Generate helper macros\n"
             );
             return 0;
         }
@@ -157,8 +158,6 @@ int main(int argc, char **argv)
                 goto bad_option;
             av_log_set_level(atoi(argv[i + 1]));
             i++;
-        } else if (!strcmp(argv[i], "-macros")) {
-            macros_gen = true;
         } else {
 bad_option:
             fprintf(stderr, "bad option or argument missing (%s) see -help\n", argv[i]);
@@ -166,14 +165,6 @@ bad_option:
         }
     }
 
-    if (macros_gen) {
-        char *macros = NULL;
-        ret = ff_sws_uops_macros_gen(&macros);
-        if (ret >= 0)
-            puts(macros);
-        av_free(macros);
-        return ret;
-    }
     /* Allocate dummy graph and context for ff_sws_compile_pass() */
     graph = ff_sws_graph_alloc();
     if (!graph)
@@ -185,7 +176,7 @@ bad_option:
 
     av_log_set_callback(log_stdout);
 
-    ret = ff_sws_enum_op_lists(ctx, graph, src_fmt, dst_fmt, print_passes);
+    ret = ff_sws_enum_op_lists(ctx, graph, NULL, src_fmt, dst_fmt, print_passes);
     if (ret < 0)
         goto fail;
 

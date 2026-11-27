@@ -257,7 +257,7 @@ static int check_exprs(AVFilterContext *ctx)
 static int scale_parse_expr(AVFilterContext *ctx, char *str_expr, AVExpr **pexpr_ptr, const char *var, const char *args)
 {
     ScaleContext *scale = ctx->priv;
-    int ret, is_inited = 0;
+    int ret, is_inited = 0, old_uses_ref = scale->uses_ref;
     char *old_str_expr = NULL;
     AVExpr *old_pexpr = NULL;
 
@@ -285,6 +285,12 @@ static int scale_parse_expr(AVFilterContext *ctx, char *str_expr, AVExpr **pexpr
     if (ret < 0)
         goto revert;
 
+    if (is_inited && scale->uses_ref && ctx->nb_inputs == 1) {
+        av_log(ctx, AV_LOG_ERROR, "Expressions with ref variables need the ref input, a command cannot add it.\n");
+        ret = AVERROR(EINVAL);
+        goto revert;
+    }
+
     if (is_inited && (ret = config_props(ctx->outputs[0])) < 0)
         goto revert;
 
@@ -295,6 +301,7 @@ static int scale_parse_expr(AVFilterContext *ctx, char *str_expr, AVExpr **pexpr
     return 0;
 
 revert:
+    scale->uses_ref = old_uses_ref;
     av_expr_free(*pexpr_ptr);
     *pexpr_ptr = NULL;
     if (old_str_expr) {
@@ -518,6 +525,16 @@ static int query_formats(const AVFilterContext *ctx,
                 ? ff_make_formats_list_singleton(scale->out_range)
                 : ff_all_color_ranges();
     if ((ret = ff_formats_ref(formats, &cfg_out[0]->color_ranges)) < 0)
+        return ret;
+
+    if ((ret = ff_formats_ref(ff_all_chroma_locations(),
+                              &cfg_in[0]->chroma_locations)) < 0)
+        return ret;
+
+    formats = scale->out_chroma_loc != AVCHROMA_LOC_UNSPECIFIED
+                ? ff_make_formats_list_singleton(scale->out_chroma_loc)
+                : ff_all_chroma_locations();
+    if ((ret = ff_formats_ref(formats, &cfg_out[0]->chroma_locations)) < 0)
         return ret;
 
     if (scale->sws->alpha_blend) {
@@ -829,7 +846,8 @@ scale:
         in->color_trc = scale->in_transfer;
     if (scale->in_range != AVCOL_RANGE_UNSPECIFIED)
         in->color_range = scale->in_range;
-    in->chroma_location = scale->in_chroma_loc;
+    if (scale->in_chroma_loc != AVCHROMA_LOC_UNSPECIFIED)
+        in->chroma_location = scale->in_chroma_loc;
 
     flags_orig = in->flags;
     if (scale->interlaced > 0)
@@ -843,6 +861,8 @@ scale:
     out->color_range = outlink->color_range;
     out->colorspace = outlink->colorspace;
     out->alpha_mode = outlink->alpha_mode;
+    if (outlink->chroma_location != AVCHROMA_LOC_UNSPECIFIED)
+        out->chroma_location = outlink->chroma_location;
     if (scale->out_chroma_loc != AVCHROMA_LOC_UNSPECIFIED)
         out->chroma_location = scale->out_chroma_loc;
     if (scale->out_primaries != -1)
@@ -870,6 +890,7 @@ scale:
     }
 
     if (sws_is_noop(out, in)) {
+        in->chroma_location = out->chroma_location;
         av_frame_free(&out);
         in->flags = flags_orig;
         *frame_out = in;
@@ -1200,6 +1221,7 @@ const FFFilter ff_vf_scale = {
     FILTER_QUERY_FUNC2(query_formats),
     .activate        = activate,
     .process_command = process_command,
+    .flags_internal = FF_FILTER_FLAG_DYNAMIC_FRAME_PARAMS,
 };
 
 static const AVClass *scale2ref_child_class_iterate(void **iter)
@@ -1267,4 +1289,5 @@ const FFFilter ff_vf_scale2ref = {
     FILTER_OUTPUTS(avfilter_vf_scale2ref_outputs),
     FILTER_QUERY_FUNC2(query_formats),
     .process_command = process_command,
+    .flags_internal = FF_FILTER_FLAG_DYNAMIC_FRAME_PARAMS,
 };

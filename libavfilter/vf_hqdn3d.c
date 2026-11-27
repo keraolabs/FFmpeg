@@ -42,7 +42,7 @@
 #include "vf_hqdn3d.h"
 
 #define LUT_BITS (depth==16 ? 8 : 4)
-#define LOAD(x) (((depth == 8 ? src[x] : AV_RN16A(src + (x) * 2)) << (16 - depth))\
+#define LOAD(x) (((depth == 8 ? src[x] : AV_RN16A(src + (x) * 2) & ((1 << depth) - 1)) << (16 - depth))\
                  + (((1 << (16 - depth)) - 1) >> 1))
 #define STORE(x,val) (depth == 8 ? dst[x] = (val) >> (16 - depth) : \
                                    AV_WN16A(dst + (x) * 2, (val) >> (16 - depth)))
@@ -254,6 +254,7 @@ static int config_input(AVFilterLink *inlink)
     int i, depth;
 
     uninit(inlink->dst);
+    s->width = 0;
 
     s->hsub  = desc->log2_chroma_w;
     s->vsub  = desc->log2_chroma_h;
@@ -417,4 +418,5 @@ const FFFilter ff_vf_hqdn3d = {
     FILTER_OUTPUTS(ff_video_default_filterpad),
     FILTER_PIXFMTS_ARRAY(pix_fmts),
     .process_command = process_command,
+    .flags_internal = FF_FILTER_FLAG_DYNAMIC_FRAME_PARAMS,
 };

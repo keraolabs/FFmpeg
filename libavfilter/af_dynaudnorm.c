@@ -172,7 +172,9 @@ static av_cold int init(AVFilterContext *ctx)
 
 static inline int frame_size(int sample_rate, int frame_len_msec)
 {
-    const int frame_size = lrint((double)sample_rate * (frame_len_msec / 1000.0));
+    const int64_t frame_size = llrint((double)sample_rate * (frame_len_msec / 1000.0));
+    if (frame_size >= INT_MAX / 2)
+        return AVERROR(EINVAL);
     return frame_size + (frame_size % 2);
 }
 
@@ -259,14 +261,14 @@ static void cqueue_resize(cqueue *q, int new_size)
     av_assert2(q->max_size >= new_size);
     av_assert2(MIN_FILTER_SIZE <= new_size);
 
-    if (new_size > q->nb_elements) {
-        const int side = (new_size - q->nb_elements) / 2;
+    if (!cqueue_empty(q) && new_size > q->size) {
+        const int side = (new_size - q->size) / 2;
 
         memmove(q->elements + side, q->elements, sizeof(double) * q->nb_elements);
         for (int i = 0; i < side; i++)
             q->elements[i] = q->elements[side];
-        q->nb_elements = new_size - 1 - side;
-    } else {
+        q->nb_elements += side;
+    } else if (!cqueue_empty(q)) {
         int count = (q->size - new_size + 1) / 2;
 
         while (count-- > 0)
@@ -350,6 +352,8 @@ static int config_input(AVFilterLink *inlink)
 
     s->channels = inlink->ch_layout.nb_channels;
     s->frame_len = frame_size(inlink->sample_rate, s->frame_len_msec);
+    if (s->frame_len < 0)
+        return s->frame_len;
     av_log(ctx, AV_LOG_DEBUG, "frame len %d\n", s->frame_len);
 
     s->prev_amplification_factor = av_malloc_array(inlink->ch_layout.nb_channels, sizeof(*s->prev_amplification_factor));
@@ -932,7 +936,7 @@ static int activate(AVFilterContext *ctx)
     AVFilterLink *outlink = ctx->outputs[0];
     DynamicAudioNormalizerContext *s = ctx->priv;
     AVFrame *in = NULL;
-    int ret = 0, status;
+    int ret = 0, status, frame_len;
     int64_t pts;
 
     ret = av_channel_layout_copy(&s->ch_layout, &inlink->ch_layout);
@@ -942,6 +946,19 @@ static int activate(AVFilterContext *ctx)
         av_channel_layout_from_string(&s->ch_layout, s->channels_to_filter);
 
     FF_FILTER_FORWARD_STATUS_BACK(outlink, inlink);
+
+    frame_len = frame_size(inlink->sample_rate, s->frame_len_msec);
+    if (frame_len < 0)
+        return frame_len;
+    if (frame_len != s->frame_len) {
+        AVFrame *window = ff_get_audio_buffer(outlink, frame_len * 2);
+        if (!window)
+            return AVERROR(ENOMEM);
+        av_frame_free(&s->window);
+        s->window = window;
+        s->frame_len = frame_len;
+    }
+    s->sample_advance = FFMAX(1, lrint(s->frame_len * (1. - s->overlap)));
 
     if (!s->eof) {
         ret = ff_inlink_consume_samples(inlink, s->sample_advance, s->sample_advance, &in);
@@ -982,7 +999,6 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
                            char *res, int res_len, int flags)
 {
     DynamicAudioNormalizerContext *s = ctx->priv;
-    AVFilterLink *inlink = ctx->inputs[0];
     int prev_filter_size = s->filter_size;
     int ret;
 
@@ -1001,8 +1017,6 @@ static int process_command(AVFilterContext *ctx, const char *cmd, const char *ar
         }
     }
 
-    s->frame_len = frame_size(inlink->sample_rate, s->frame_len_msec);
-    s->sample_advance = FFMAX(1, lrint(s->frame_len * (1. - s->overlap)));
     if (s->expr_str) {
         ret = av_expr_parse(&s->expr, s->expr_str, var_names, NULL, NULL,
                             NULL, NULL, 0, ctx);

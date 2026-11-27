@@ -205,6 +205,12 @@ static int raw_decode(AVCodecContext *avctx, AVFrame *frame,
         (context->is_mono || context->is_pal8) &&
         (!avctx->codec_tag || avctx->codec_tag == MKTAG('r','a','w',' ') ||
                 context->is_nut_mono || context->is_nut_pal8)) {
+        int bits = context->is_mono ? 1 :
+                   avctx->bits_per_coded_sample ? avctx->bits_per_coded_sample : 8;
+        if (stride < ((int64_t)avctx->width * bits + 7) / 8) {
+            av_log(avctx, AV_LOG_ERROR, "Packet too small (%d)\n", avpkt->size);
+            return AVERROR_INVALIDDATA;
+        }
         context->is_1_2_4_8_bpp = 1;
         if (context->is_mono) {
             int row_bytes = avctx->width / 8 + (avctx->width & 7 ? 1 : 0);
@@ -422,7 +428,8 @@ static int raw_decode(AVCodecContext *avctx, AVFrame *frame,
         avctx->codec_tag == MKTAG('Y', 'V', 'U', '9'))
         FFSWAP(uint8_t *, frame->data[1], frame->data[2]);
 
-    if (avctx->codec_tag == AV_RL32("I420") && (avctx->width+1)*(avctx->height+1) * 3/2 == buf_size) {
+    if (avctx->codec_tag == AV_RL32("I420") && !((avctx->width | avctx->height) & 1) &&
+        (avctx->width+1)*(avctx->height+1) * 3/2 == buf_size) {
         frame->data[1] = frame->data[1] +  (avctx->width+1)*(avctx->height+1) -avctx->width*avctx->height;
         frame->data[2] = frame->data[2] + ((avctx->width+1)*(avctx->height+1) -avctx->width*avctx->height)*5/4;
     }

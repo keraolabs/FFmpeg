@@ -67,6 +67,7 @@ extern const URLProtocol ff_udp_protocol;
 extern const URLProtocol ff_udplite_protocol;
 extern const URLProtocol ff_unix_protocol;
 extern const URLProtocol ff_libamqp_protocol;
+extern const URLProtocol ff_libcurl_protocol;
 extern const URLProtocol ff_librist_protocol;
 extern const URLProtocol ff_librtmp_protocol;
 extern const URLProtocol ff_librtmpe_protocol;
@@ -79,6 +80,7 @@ extern const URLProtocol ff_libsmbclient_protocol;
 extern const URLProtocol ff_libzmq_protocol;
 extern const URLProtocol ff_ipfs_gateway_protocol;
 extern const URLProtocol ff_ipns_gateway_protocol;
+extern const URLProtocol ff_windows_handle_protocol;
 
 #include "libavformat/protocol_list.c"
 

@@ -161,7 +161,7 @@ static int config_output_video(AVFilterLink *outlink)
 static inline char *double2int64str(char *buf, double v)
 {
     if (isnan(v)) snprintf(buf, BUF_SIZE, "nan");
-    else          snprintf(buf, BUF_SIZE, "%"PRId64, (int64_t)v);
+    else          snprintf(buf, BUF_SIZE, "%"PRId64, D2TS(v));
     return buf;
 }
 
@@ -350,6 +350,7 @@ const FFFilter ff_vf_setpts = {
 
     FILTER_INPUTS(avfilter_vf_setpts_inputs),
     FILTER_OUTPUTS(outputs_video),
+    .flags_internal = FF_FILTER_FLAG_DYNAMIC_FRAME_PARAMS,
 };
 #endif /* CONFIG_SETPTS_FILTER */
 

@@ -35,7 +35,7 @@
 #include "config.h"
 #include "swscale_internal.h"
 #include "swscale.h"
-#if CONFIG_VULKAN
+#if CONFIG_SWSCALE_VULKAN
 #include "vulkan/ops.h"
 #endif
 
@@ -726,7 +726,7 @@ static void reset_ptr(const uint8_t *src[], enum AVPixelFormat format)
 }
 
 static int check_image_pointers(const uint8_t * const data[4], enum AVPixelFormat pix_fmt,
-                                const int linesizes[4])
+                                const int linesizes[4], int h)
 {
     const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(pix_fmt);
     int i;
@@ -735,7 +735,7 @@ static int check_image_pointers(const uint8_t * const data[4], enum AVPixelForma
 
     for (i = 0; i < 4; i++) {
         int plane = desc->comp[i].plane;
-        if (!data[plane] || !linesizes[plane])
+        if (!data[plane] || !linesizes[plane] || FFABS((int64_t)linesizes[plane]) * h > INT_MAX)
             return 0;
     }
 
@@ -1060,17 +1060,17 @@ static int scale_internal(SwsContext *sws,
         return AVERROR(EINVAL);
     }
 
-    if (!check_image_pointers(srcSlice, sws->src_format, srcStride)) {
-        av_log(c, AV_LOG_ERROR, "bad src image pointers\n");
+    if (!check_image_pointers(srcSlice, sws->src_format, srcStride, sws->src_h)) {
+        av_log(c, AV_LOG_ERROR, "bad src image pointers or strides\n");
         return AVERROR(EINVAL);
     }
-    if (!check_image_pointers((const uint8_t* const*)dstSlice, sws->dst_format, dstStride)) {
-        av_log(c, AV_LOG_ERROR, "bad dst image pointers\n");
+    if (!check_image_pointers((const uint8_t* const*)dstSlice, sws->dst_format, dstStride, sws->dst_h)) {
+        av_log(c, AV_LOG_ERROR, "bad dst image pointers or strides\n");
         return AVERROR(EINVAL);
     }
 
     // do not mess up sliceDir if we have a "trailing" 0-size slice
-    if (srcSliceH == 0)
+    if (srcSliceH == 0 || dstSliceH == 0)
         return 0;
 
     if (sws->gamma_flag && c->cascaded_context[0])
@@ -1108,7 +1108,7 @@ static int scale_internal(SwsContext *sws,
         int x,y;
 
         av_fast_malloc(&c->rgb0_scratch, &c->rgb0_scratch_allocated,
-                       FFABS(srcStride[0]) * srcSliceH + 32);
+                       FFABS((int64_t)srcStride[0]) * srcSliceH + 32);
         if (!c->rgb0_scratch)
             return AVERROR(ENOMEM);
 
@@ -1127,7 +1127,7 @@ static int scale_internal(SwsContext *sws,
         uint8_t *base;
 
         av_fast_malloc(&c->xyz_scratch, &c->xyz_scratch_allocated,
-                       FFABS(srcStride[0]) * srcSliceH + 32);
+                       FFABS((int64_t)srcStride[0]) * srcSliceH + 32);
         if (!c->xyz_scratch)
             return AVERROR(ENOMEM);
 
@@ -1226,24 +1226,78 @@ void sws_frame_end(SwsContext *sws)
     c->src_ranges.nb_ranges = 0;
 }
 
+static int ptr_in_buf(const uint8_t *ptr, const AVBufferRef *buf)
+{
+    uintptr_t ptr_val = (uintptr_t) ptr;
+    uintptr_t buf_start = (uintptr_t) buf->data;
+    return ptr_val >= buf_start && ptr_val < buf_start + buf->size;
+}
+
+/* Similar to av_frame_ref() but only references planes in the given map */
+static int frame_ref(AVFrame *dst, const AVFrame *src, const int plane_copy[4])
+{
+    int copied[AV_NUM_DATA_POINTERS] = {0};
+    int nb_copied = 0;
+
+    for (int i = 0; i < 4; i++) {
+        const int idx = plane_copy[i];
+        if (idx < 0)
+            continue;
+        /* Find corresponding source buffer */
+        uint8_t *src_data = src->data[idx];
+        if (!src_data)
+            return AVERROR(EINVAL);
+        for (int j = 0; j < FF_ARRAY_ELEMS(src->buf); j++) {
+            AVBufferRef *buf = src->buf[j];
+            if (!buf)
+                break;
+            if (!ptr_in_buf(src_data, buf))
+                continue;
+            if (!copied[j]) {
+                AVBufferRef *ref = av_buffer_ref(buf);
+                if (!ref)
+                    return AVERROR(ENOMEM);
+                dst->buf[nb_copied++] = ref;
+                copied[j] = 1;
+            }
+            dst->data[i]     = src_data;
+            dst->linesize[i] = src->linesize[idx];
+            break;
+        }
+    }
+
+    return 0;
+}
+
+/* Returns the number of buffers allocated */
 static int frame_alloc_buffers(SwsContext *sws, AVFrame *frame)
 {
     SwsInternal *c = sws_internal(sws);
     FFFramePool *pool = &c->frame_pool;
-
     av_assert0(!frame->hw_frames_ctx);
-    const int nb_planes = av_pix_fmt_count_planes(frame->format);
-    for (int i = 0; i < nb_planes; i++) {
-        frame->linesize[i] = pool->linesize[i];
-        frame->buf[i] = av_buffer_pool_get(pool->pools[i]);
-        if (!frame->buf[i]) {
+
+    /* Find first free buffer slot */
+    int buf_start = 0;
+    while (frame->buf[buf_start])
+        buf_start++;
+    int nb_bufs = 0;
+
+    for (int i = 0; i < 4 && pool->pools[i]; i++) {
+        if (frame->data[i])
+            continue; /* already ref'd by frame_ref */
+
+        const int idx = buf_start + nb_bufs++;
+        av_assert1(idx < FF_ARRAY_ELEMS(frame->buf));
+        frame->buf[idx] = av_buffer_pool_get(pool->pools[i]);
+        if (!frame->buf[idx]) {
             av_frame_unref(frame);
             return AVERROR(ENOMEM);
         }
-        frame->data[i] = frame->buf[i]->data;
+        frame->data[i] = frame->buf[idx]->data;
+        frame->linesize[i] = pool->linesize[i];
     }
 
-    return 0;
+    return nb_bufs;
 }
 
 int sws_frame_start(SwsContext *sws, AVFrame *dst, const AVFrame *src)
@@ -1328,26 +1382,13 @@ int sws_receive_slice(SwsContext *sws, unsigned int slice_start,
 
     if (c->slicethread) {
         int nb_jobs = c->nb_slice_ctx;
-        int ret = 0;
-
         if (c->slice_ctx[0]->dither == SWS_DITHER_ED)
             nb_jobs = 1;
 
         c->dst_slice_start  = slice_start;
         c->dst_slice_height = slice_height;
 
-        avpriv_slicethread_execute(c->slicethread, nb_jobs, 0);
-
-        for (int i = 0; i < c->nb_slice_ctx; i++) {
-            if (c->slice_err[i] < 0) {
-                ret = c->slice_err[i];
-                break;
-            }
-        }
-
-        memset(c->slice_err, 0, c->nb_slice_ctx * sizeof(*c->slice_err));
-
-        return ret;
+        return avpriv_slicethread_execute2(c->slicethread, nb_jobs, 0);
     }
 
     for (int i = 0; i < FF_ARRAY_ELEMS(dst); i++) {
@@ -1360,21 +1401,12 @@ int sws_receive_slice(SwsContext *sws, unsigned int slice_start,
                           dst, c->frame_dst->linesize, slice_start, slice_height);
 }
 
-/* Subset of av_frame_ref() that only references (video) data buffers */
-static int frame_ref(AVFrame *dst, const AVFrame *src)
+static int frame_strides_fit(const AVFrame *frame)
 {
-    /* ref the buffers */
-    for (int i = 0; i < FF_ARRAY_ELEMS(src->buf); i++) {
-        if (!src->buf[i])
-            break;
-        dst->buf[i] = av_buffer_ref(src->buf[i]);
-        if (!dst->buf[i])
-            return AVERROR(ENOMEM);
-    }
-
-    memcpy(dst->data,     src->data,     sizeof(src->data));
-    memcpy(dst->linesize, src->linesize, sizeof(src->linesize));
-    return 0;
+    for (int i = 0; i < FF_ARRAY_ELEMS(frame->linesize); i++)
+        if (FFABS((int64_t)frame->linesize[i]) * frame->height > INT_MAX)
+            return 0;
+    return 1;
 }
 
 int sws_scale_frame(SwsContext *sws, AVFrame *dst, const AVFrame *src)
@@ -1407,6 +1439,11 @@ int sws_scale_frame(SwsContext *sws, AVFrame *dst, const AVFrame *src)
     if (!src->data[0])
         return 0;
 
+    if (!frame_strides_fit(src) || (dst->data[0] && !frame_strides_fit(dst))) {
+        av_log(sws, AV_LOG_ERROR, "Frame planes larger than INT_MAX bytes are not supported\n");
+        return AVERROR(EINVAL);
+    }
+
     const SwsGraph *top = c->graph[FIELD_TOP];
     const SwsGraph *bot = c->graph[FIELD_BOTTOM];
     if (dst->data[0]) /* user-provided buffers */
@@ -1418,13 +1455,28 @@ int sws_scale_frame(SwsContext *sws, AVFrame *dst, const AVFrame *src)
     memset(dst->linesize, 0, sizeof(dst->linesize));
     dst->extended_data = dst->data;
 
-    if (src->buf[0] && top->noop && (!bot || bot->noop))
-        return frame_ref(dst, src);
+    if (src->buf[0]) {
+        /* Determine end-to-end plane copy map */
+        int plane_copy[FF_ARRAY_ELEMS(top->plane_copy)];
+        memcpy(plane_copy, top->plane_copy, sizeof(plane_copy));
+        for (int i = 0; bot && i < FF_ARRAY_ELEMS(plane_copy); i++) {
+            if (bot->plane_copy[i] != plane_copy[i])
+                plane_copy[i] = -1;
+        }
 
+        ret = frame_ref(dst, src, plane_copy);
+        if (ret < 0)
+            return ret;
+    }
+
+    /* Allocate any missing buffers not yet ref'd */
     ret = frame_alloc_buffers(sws, dst);
     if (ret < 0)
         return ret;
-    allocated = 1;
+    else if (!ret)
+        return 0; /* no buffers allocated, no-op (all ref'd) */
+    else
+        allocated = 1;
 
 process_frame:
     for (int field = 0; field < (bot ? 2 : 1); field++) {
@@ -1457,6 +1509,12 @@ static int validate_params(SwsContext *ctx)
     return 0;
 }
 
+static int bottom_field_fits(const AVFrame *frame, const SwsFormat *field)
+{
+    const int vsub = field->desc->log2_chroma_h;
+    return 2 * AV_CEIL_RSHIFT(field->height, vsub) <= AV_CEIL_RSHIFT(frame->height, vsub);
+}
+
 int sws_frame_setup(SwsContext *ctx, const AVFrame *dst, const AVFrame *src)
 {
     SwsInternal *s = sws_internal(ctx);
@@ -1468,10 +1526,22 @@ int sws_frame_setup(SwsContext *ctx, const AVFrame *dst, const AVFrame *src)
     if ((ret = validate_params(ctx)) < 0)
         return ret;
 
+    const AVPixFmtDescriptor *src_desc = av_pix_fmt_desc_get(src->format);
+    const AVPixFmtDescriptor *dst_desc = av_pix_fmt_desc_get(dst->format);
+    av_assert0(src_desc);
+    av_assert0(dst_desc);
+
+    const int src_is_hwaccel = !!(src_desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    const int dst_is_hwaccel = !!(dst_desc->flags & AV_PIX_FMT_FLAG_HWACCEL);
+    if (src_is_hwaccel && !src->hw_frames_ctx)
+        return AVERROR(EINVAL);
+    if (dst_is_hwaccel && !dst->hw_frames_ctx)
+        return AVERROR(EINVAL);
+
     /* For now, if a single frame has a context, then both need a context */
-    if (!!src->hw_frames_ctx != !!dst->hw_frames_ctx) {
+    if (src_is_hwaccel ^ dst_is_hwaccel) {
         return AVERROR(ENOTSUP);
-    } else if (!!src->hw_frames_ctx) {
+    } else if (src_is_hwaccel) {
         /* Both hardware frames must already be allocated */
         if (!src->data[0] || !dst->data[0])
             return AVERROR(EINVAL);
@@ -1490,7 +1560,7 @@ int sws_frame_setup(SwsContext *ctx, const AVFrame *dst, const AVFrame *src)
         if (dev_ctx->type != AV_HWDEVICE_TYPE_VULKAN)
             return AVERROR(ENOTSUP);
 
-#if CONFIG_UNSTABLE && CONFIG_VULKAN
+#if CONFIG_SWSCALE_VULKAN
         ret = ff_sws_vk_init(ctx, src_hwfc->device_ref);
         if (ret < 0)
             return ret;
@@ -1506,6 +1576,19 @@ int sws_frame_setup(SwsContext *ctx, const AVFrame *dst, const AVFrame *src)
 
         if ((src->flags ^ dst->flags) & AV_FRAME_FLAG_INTERLACED) {
             err_msg = "Cannot convert interlaced to progressive frames or vice versa.\n";
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+
+        if (src_fmt.height <= 0 || dst_fmt.height <= 0) {
+            err_msg = "Interlaced frames need at least two lines";
+            ret = AVERROR(EINVAL);
+            goto fail;
+        }
+
+        if (field == FIELD_BOTTOM &&
+            (!bottom_field_fits(src, &src_fmt) || !bottom_field_fits(dst, &dst_fmt))) {
+            err_msg = "The bottom field has fewer chroma rows than its height requires";
             ret = AVERROR(EINVAL);
             goto fail;
         }
@@ -1602,8 +1685,8 @@ int attribute_align_arg sws_scale(SwsContext *sws,
                           dst, dstStride, 0, sws->dst_h);
 }
 
-void ff_sws_slice_worker(void *priv, int jobnr, int threadnr,
-                         int nb_jobs, int nb_threads)
+int ff_sws_slice_worker(void *priv, int jobnr, int threadnr,
+                        int nb_jobs, int nb_threads)
 {
     SwsInternal *parent = priv;
     SwsContext     *sws = parent->slice_ctx[threadnr];
@@ -1632,5 +1715,8 @@ void ff_sws_slice_worker(void *priv, int jobnr, int threadnr,
                              parent->dst_slice_start + slice_start, slice_end - slice_start);
     }
 
-    parent->slice_err[threadnr] = err;
+    if (err < 0)
+        return err;
+
+    return 0; /* ff_slicethread_execute() aborts on non-zero */
 }

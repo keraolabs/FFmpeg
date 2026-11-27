@@ -118,17 +118,25 @@ static int resize_samples_## name ##p(ChanDelay *d, int64_t new_delay)          
         return 0;                                                                                       \
     }                                                                                                   \
                                                                                                         \
-    samples = (type *) av_fast_realloc(d->samples, &d->samples_size, new_delay * sizeof(type));         \
-    if (!samples) {                                                                                     \
+    if (new_delay > SIZE_MAX / sizeof(type)) {                                                          \
         return AVERROR(ENOMEM);                                                                         \
     }                                                                                                   \
                                                                                                         \
+    samples = (type *) d->samples;                                                                      \
+    if (new_delay > d->delay) {                                                                         \
+        samples = (type *) av_fast_realloc(d->samples, &d->samples_size, new_delay * sizeof(type));     \
+        if (!samples) {                                                                                 \
+            return AVERROR(ENOMEM);                                                                     \
+        }                                                                                               \
+    }                                                                                                   \
+                                                                                                        \
     if (new_delay < d->delay) {                                                                         \
-        if (d->index > new_delay) {                                                                     \
-            d->index -= new_delay;                                                                      \
-            memmove(samples, &samples[new_delay], d->index * sizeof(type));                             \
+        const size_t newest_end = d->delay_index < d->delay ? d->delay_index : d->index;                \
+        if (newest_end >= new_delay) {                                                                  \
+            memmove(samples, &samples[newest_end - new_delay], new_delay * sizeof(type));               \
+            d->index = 0;                                                                               \
             d->delay_index = new_delay;                                                                 \
-        } else if (d->delay_index > d->index) {                                                         \
+        } else if (d->delay_index >= d->delay) {                                                        \
             memmove(&samples[d->index], &samples[d->index+(d->delay-new_delay)],                        \
                     (new_delay - d->index) * sizeof(type));                                             \
             d->delay_index -= d->delay - new_delay;                                                     \
@@ -139,11 +147,9 @@ static int resize_samples_## name ##p(ChanDelay *d, int64_t new_delay)          
             block_size = (d->delay - d->index) * sizeof(type);                                          \
             memmove(&samples[d->index+(new_delay - d->delay)], &samples[d->index], block_size);         \
             d->delay_index = new_delay;                                                                 \
-        } else {                                                                                        \
-            d->delay_index += new_delay - d->delay;                                                     \
+            block_size = (new_delay - d->delay) * sizeof(type);                                         \
+            memset(&samples[d->index], fill, block_size);                                               \
         }                                                                                               \
-        block_size = (new_delay - d->delay) * sizeof(type);                                             \
-        memset(&samples[d->index], fill, block_size);                                                   \
     }                                                                                                   \
     d->delay = new_delay;                                                                               \
     d->samples = (void *) samples;                                                                      \
@@ -157,22 +163,35 @@ CHANGE_DELAY(flt, float,   0)
 CHANGE_DELAY(dbl, double,  0)
 
 static int parse_delays(char *p, char **saveptr, int64_t *result, AVFilterContext *ctx, int sample_rate) {
-    float delay, div;
-    int ret;
+    double delay, div;
     char *arg;
-    char type = 0;
+    char suffix;
 
     if (!(arg = av_strtok(p, "|", saveptr)))
         return 1;
 
-    ret = av_sscanf(arg, "%"SCNd64"%c", result, &type);
-    if (ret != 2 || type != 'S') {
-        div = type == 's' ? 1.0 : 1000.0;
-        if (av_sscanf(arg, "%f", &delay) != 1) {
+    suffix = arg[strlen(arg) - 1];
+    if (suffix != 'S') {
+        double delay_samples;
+
+        div = suffix == 's' ? 1.0 : 1000.0;
+        if (av_sscanf(arg, "%lf", &delay) != 1) {
             av_log(ctx, AV_LOG_ERROR, "Invalid syntax for delay.\n");
             return AVERROR(EINVAL);
         }
-        *result = delay * sample_rate / div;
+        delay_samples = delay * sample_rate / div;
+        if (!isfinite(delay_samples) || delay_samples < -0x1p63 || delay_samples >= 0x1p63) {
+            av_log(ctx, AV_LOG_ERROR, "Delay is out of range.\n");
+            return AVERROR(EINVAL);
+        }
+        *result = delay_samples;
+    } else {
+        char type;
+
+        if (av_sscanf(arg, "%"SCNd64"%c", result, &type) != 2 || type != 'S') {
+            av_log(ctx, AV_LOG_ERROR, "Invalid syntax for delay.\n");
+            return AVERROR(EINVAL);
+        }
     }
 
     if (*result < 0) {

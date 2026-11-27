@@ -5,7 +5,7 @@ from pathlib import Path
 
 from common import MAX_LISTED_LINES, Check, capture, counterexample
 
-UPSTREAM_TAG = "n9.0.2"
+UPSTREAM_TAG = "n9.1"
 UPSTREAM_VERSION = UPSTREAM_TAG.removeprefix("n")
 RELEASE_TAG = re.compile(rf"{re.escape(UPSTREAM_TAG)}-kerao\.([1-9][0-9]*)")
 RELEASE_TAG_CHECK = "release tag"
@@ -51,7 +51,7 @@ def read_source(root: Path) -> Source:
 
 
 def release_tag(source: Source) -> str | None:
-    """The annotated n9.0.2-kerao.<n> tag at HEAD, or None unless there is exactly one."""
+    """The annotated n9.1-kerao.<n> tag at HEAD, or None unless there is exactly one."""
     tags = [
         name
         for name, kind in source.head_tags

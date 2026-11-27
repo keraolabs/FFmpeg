@@ -2534,7 +2534,24 @@ static int mkv_parse_block_addition_mappings(AVFormatContext *s, AVStream *st, M
 {
     const EbmlList *mappings_list = &track->block_addition_mappings;
     MatroskaBlockAdditionMapping *mappings = mappings_list->elem;
+    int nb_itutt35 = 0;
     int ret;
+
+    for (int i = 0; i < mappings_list->nb_elem; i++) {
+        MatroskaBlockAdditionMapping *mapping = &mappings[i];
+
+        switch (mapping->type) {
+        case MATROSKA_BLOCK_ADD_ID_TYPE_ITU_T_T35:
+            if (nb_itutt35 && mapping->extradata.size < 4) {
+                av_log(s, AV_LOG_ERROR, "One or more maps for BlockAddIDType 4 lack extradata\n");
+                return AVERROR_INVALIDDATA;
+            }
+            nb_itutt35++;
+            break;
+        default:
+            break;
+        }
+    }
 
     for (int i = 0; i < mappings_list->nb_elem; i++) {
         MatroskaBlockAdditionMapping *mapping = &mappings[i];
@@ -2548,7 +2565,6 @@ static int mkv_parse_block_addition_mappings(AVFormatContext *s, AVStream *st, M
             type = MATROSKA_BLOCK_ADD_ID_TYPE_OPAQUE;
             av_fallthrough;
         case MATROSKA_BLOCK_ADD_ID_TYPE_OPAQUE:
-        case MATROSKA_BLOCK_ADD_ID_TYPE_ITU_T_T35:
             if (mapping->value != type) {
                 int strict = s->strict_std_compliance >= FF_COMPLIANCE_STRICT;
                 av_log(s, strict ? AV_LOG_ERROR : AV_LOG_WARNING,
@@ -3410,7 +3426,7 @@ static int matroska_parse_dovi_streams(AVFormatContext *s)
     if (err < 0)
         return err;
 
-    stg->params.layered_video->el_index = stg->nb_streams - 1;
+    stg->params.layered_video->el_index = stg->nb_entries - 1;
     stg->params.layered_video->width = bl_st->codecpar->width;
     stg->params.layered_video->height = bl_st->codecpar->height;
 
@@ -3490,7 +3506,8 @@ static int matroska_read_header(AVFormatContext *s)
 
     if (!matroska->time_scale)
         matroska->time_scale = 1000000;
-    if (isnan(matroska->duration))
+    if (isnan(matroska->duration) || matroska->duration < 0 ||
+        matroska->duration >= (double)INT64_MAX / matroska->time_scale)
         matroska->duration = 0;
     if (matroska->duration)
         matroska->ctx->duration = matroska->duration * matroska->time_scale *
@@ -4365,7 +4382,9 @@ static int matroska_parse_block(MatroskaDemuxContext *matroska, AVBufferRef *buf
     }
 
     if (!block_duration && trust_default_duration)
-        block_duration = track->default_duration * laces / matroska->time_scale;
+        block_duration = av_rescale_q(track->default_duration * laces,
+                                      (AVRational) { 1, 1000000000 },
+                                      st->time_base);
 
     if (cluster_time != (uint64_t)-1 && (block_time >= 0 || cluster_time >= -block_time))
         track->end_timecode =
@@ -4599,6 +4618,7 @@ static CueDesc get_cue_desc(AVFormatContext *s, int64_t ts, int64_t cues_start) 
     AVIndexEntry *const index_entries = sti->index_entries;
     int nb_index_entries = sti->nb_index_entries;
     CueDesc cue_desc;
+    int64_t end_pos;
     int i;
 
     if (ts >= (int64_t)(matroska->duration * matroska->time_scale))
@@ -4611,6 +4631,9 @@ static CueDesc get_cue_desc(AVFormatContext *s, int64_t ts, int64_t cues_start) 
     }
     --i;
     if (index_entries[i].timestamp > matroska->duration)
+        return (CueDesc) {-1, -1, -1, -1};
+    end_pos = i != nb_index_entries - 1 ? index_entries[i + 1].pos : cues_start;
+    if (index_entries[i].pos < matroska->segment_start || end_pos < matroska->segment_start)
         return (CueDesc) {-1, -1, -1, -1};
     cue_desc.start_time_ns = index_entries[i].timestamp * matroska->time_scale;
     cue_desc.start_offset = index_entries[i].pos - matroska->segment_start;

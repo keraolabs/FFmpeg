@@ -57,9 +57,9 @@ Both modes need a checkout without a `VERSION` file, because one would override 
 
 | | `release` | `dev` |
 | --- | --- | --- |
-| Checkout | HEAD carries exactly one annotated `n9.0.2-kerao.<n>` tag, and `git status` shows nothing, untracked files included | any commit and worktree whose `git describe --tags` starts with `n9.0.2` |
+| Checkout | HEAD carries exactly one annotated `n9.1-kerao.<n>` tag, and `git status` shows nothing, untracked files included | any commit and worktree whose `git describe --tags` starts with `n9.1` |
 | iPhone | required | optional |
-| `av_version_info()` of every slice | exactly the tag | `n9.0.2`, or `n9.0.2-` followed by anything |
+| `av_version_info()` of every slice | exactly the tag | `n9.1`, or `n9.1-` followed by anything |
 | `artifact.json` `tag` | the tag | `git describe --tags --always` |
 | `artifact.json` `unverified` | `[]` | `ios-arm64 codecs`, `ios-arm64 av_version_info` and `ios-arm64 stream read` without `--device`, otherwise `[]` |
 
@@ -180,23 +180,23 @@ A run is judged by its console output alone, and on the iPhone devicectl's exit 
 
 ## Cutting a release
 
-A release is an annotated `n9.0.2-kerao.<n>` tag on the `kerao` branch, built once from a fresh clone. `<n>` starts at 1 for each upstream tag. A tag is never moved, deleted or reused: a fix ships as the next `<n>`, on a new commit, because a HEAD with two release tags fails `release tag`. Rebuilding from an existing tag needs no new one.
+A release is an annotated `n9.1-kerao.<n>` tag on the `kerao` branch, built once from a fresh clone. `<n>` starts at 1 for each upstream tag. A tag is never moved, deleted or reused: a fix ships as the next `<n>`, on a new commit, because a HEAD with two release tags fails `release tag`. Rebuilding from an existing tag needs no new one.
 
 1. Merge everything the release ships into `kerao`, then tag its tip and push the tag:
 
    ```sh
    git switch kerao
    git pull --ff-only
-   git tag -a n9.0.2-kerao.<n> -m n9.0.2-kerao.<n>
-   git push origin n9.0.2-kerao.<n>
+   git tag -a n9.1-kerao.<n> -m n9.1-kerao.<n>
+   git push origin n9.1-kerao.<n>
    ```
 
 2. Clone the tag into a new directory and build it in `release` mode, with the Simulator booted and the iPhone connected:
 
    ```sh
-   git clone --branch n9.0.2-kerao.<n> https://github.com/keraolabs/FFmpeg.git <clone>
+   git clone --branch n9.1-kerao.<n> https://github.com/keraolabs/FFmpeg.git <clone>
    python3 <clone>/kerao/build.py --output <dir> --mode release --device <udid> \
        --codesign-identity <sha-1> --provisioning-profile <path> > summary.txt
    ```
 
-3. The build must exit 0. `artifact.json` then has `mode` `release`, `dirty` `false`, `tag` `n9.0.2-kerao.<n>` and `unverified` `[]`, and the summary's three `av_version_info` lines read exactly `n9.0.2-kerao.<n>`. The fork has no CI, so post `summary.txt` and `artifact.json` on the release's issue in keraolabs/kerao as its evidence.
+3. The build must exit 0. `artifact.json` then has `mode` `release`, `dirty` `false`, `tag` `n9.1-kerao.<n>` and `unverified` `[]`, and the summary's three `av_version_info` lines read exactly `n9.1-kerao.<n>`. The fork has no CI, so post `summary.txt` and `artifact.json` on the release's issue in keraolabs/kerao as its evidence.

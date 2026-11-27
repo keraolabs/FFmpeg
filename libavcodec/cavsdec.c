@@ -615,7 +615,7 @@ static inline int decode_residual_chroma(AVSContext *h)
 
 static inline int decode_residual_inter(AVSContext *h)
 {
-    int block;
+    int block, ret;
 
     /* get coded block pattern */
     int cbp = get_ue_golomb(&h->gb);
@@ -629,12 +629,15 @@ static inline int decode_residual_inter(AVSContext *h)
     if (h->cbp && !h->qp_fixed)
         h->qp = (h->qp + (unsigned)get_se_golomb(&h->gb)) & 63;
     for (block = 0; block < 4; block++)
-        if (h->cbp & (1 << block))
-            decode_residual_block(h, &h->gb, inter_dec, 0, h->qp,
-                                  h->cy + h->luma_scan[block], h->l_stride);
-    decode_residual_chroma(h);
+        if (h->cbp & (1 << block)) {
+            ret = decode_residual_block(h, &h->gb, inter_dec, 0, h->qp,
+                                        h->cy + h->luma_scan[block],
+                                        h->l_stride);
+            if (ret < 0)
+                return ret;
+        }
 
-    return 0;
+    return decode_residual_chroma(h);
 }
 
 /*****************************************************************************
@@ -645,9 +648,9 @@ static inline int decode_residual_inter(AVSContext *h)
 
 static inline void set_mv_intra(AVSContext *h)
 {
-    h->mv[MV_FWD_X0] = ff_cavs_intra_mv;
+    h->mv[MV_FWD_X0] = CAVS_INTRA_MV;
     set_mvs(&h->mv[MV_FWD_X0], BLK_16X16);
-    h->mv[MV_BWD_X0] = ff_cavs_intra_mv;
+    h->mv[MV_BWD_X0] = CAVS_INTRA_MV;
     set_mvs(&h->mv[MV_BWD_X0], BLK_16X16);
     if (h->cur.f->pict_type != AV_PICTURE_TYPE_B)
         h->col_type_base[h->mbidx] = I_8X8;
@@ -738,10 +741,11 @@ static inline void set_intra_mode_default(AVSContext *h)
     }
 }
 
-static void decode_mb_p(AVSContext *h, enum cavs_mb mb_type)
+static int decode_mb_p(AVSContext *h, enum cavs_mb mb_type)
 {
     GetBitContext *gb = &h->gb;
     int ref[4];
+    int ret;
 
     ff_cavs_init_mb(h);
     switch (mb_type) {
@@ -773,14 +777,24 @@ static void decode_mb_p(AVSContext *h, enum cavs_mb mb_type)
         ff_cavs_mv(h, MV_FWD_X1, MV_FWD_C2, MV_PRED_MEDIAN,   BLK_8X8, ref[1]);
         ff_cavs_mv(h, MV_FWD_X2, MV_FWD_X1, MV_PRED_MEDIAN,   BLK_8X8, ref[2]);
         ff_cavs_mv(h, MV_FWD_X3, MV_FWD_X0, MV_PRED_MEDIAN,   BLK_8X8, ref[3]);
+        break;
+    default:
+        av_log(h->avctx, AV_LOG_ERROR, "Invalid mb_type %d in P frame\n",
+               mb_type);
+        return AVERROR_INVALIDDATA;
     }
     ff_cavs_inter(h, mb_type);
     set_intra_mode_default(h);
     store_mvs(h);
-    if (mb_type != P_SKIP)
-        decode_residual_inter(h);
+    if (mb_type != P_SKIP) {
+        ret = decode_residual_inter(h);
+        if (ret < 0)
+            return ret;
+    }
     ff_cavs_filter(h, mb_type);
     h->col_type_base[h->mbidx] = mb_type;
+
+    return 0;
 }
 
 static int decode_mb_b(AVSContext *h, enum cavs_mb mb_type)
@@ -788,13 +802,14 @@ static int decode_mb_b(AVSContext *h, enum cavs_mb mb_type)
     int block;
     enum cavs_sub_mb sub_type[4];
     int flags;
+    int ret;
 
     ff_cavs_init_mb(h);
 
     /* reset all MVs */
-    h->mv[MV_FWD_X0] = ff_cavs_dir_mv;
+    h->mv[MV_FWD_X0] = CAVS_DIR_MV;
     set_mvs(&h->mv[MV_FWD_X0], BLK_16X16);
-    h->mv[MV_BWD_X0] = ff_cavs_dir_mv;
+    h->mv[MV_BWD_X0] = CAVS_DIR_MV;
     set_mvs(&h->mv[MV_BWD_X0], BLK_16X16);
     switch (mb_type) {
     case B_SKIP:
@@ -913,8 +928,11 @@ static int decode_mb_b(AVSContext *h, enum cavs_mb mb_type)
     }
     ff_cavs_inter(h, mb_type);
     set_intra_mode_default(h);
-    if (mb_type != B_SKIP)
-        decode_residual_inter(h);
+    if (mb_type != B_SKIP) {
+        ret = decode_residual_inter(h);
+        if (ret < 0)
+            return ret;
+    }
     ff_cavs_filter(h, mb_type);
 
     return 0;
@@ -1115,9 +1133,13 @@ static int decode_pic(AVSContext *h)
                     break;
                 }
                 skip_count = get_ue_golomb(&h->gb);
+                if (skip_count < 0) {
+                    ret = AVERROR_INVALIDDATA;
+                    break;
+                }
             }
             if (h->skip_mode_flag && skip_count--) {
-                decode_mb_p(h, P_SKIP);
+                ret = decode_mb_p(h, P_SKIP);
             } else {
                 if (get_bits_left(&h->gb) < 1) {
                     ret = AVERROR_INVALIDDATA;
@@ -1127,7 +1149,7 @@ static int decode_pic(AVSContext *h)
                 if (mb_type > P_8X8)
                     ret = decode_mb_i(h, mb_type - P_8X8 - 1);
                 else
-                    decode_mb_p(h, mb_type);
+                    ret = decode_mb_p(h, mb_type);
             }
             if (ret < 0)
                 break;
@@ -1142,6 +1164,10 @@ static int decode_pic(AVSContext *h)
                     break;
                 }
                 skip_count = get_ue_golomb(&h->gb);
+                if (skip_count < 0) {
+                    ret = AVERROR_INVALIDDATA;
+                    break;
+                }
             }
             if (h->skip_mode_flag && skip_count--) {
                 ret = decode_mb_b(h, B_SKIP);

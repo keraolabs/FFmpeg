@@ -27,6 +27,7 @@
 
 #include "libavutil/internal.h"
 #include "libavutil/common.h"
+#include "libavutil/mem.h"
 #include "libavutil/pixdesc.h"
 #include "libavutil/pixfmt.h"
 #include "libavutil/imgutils.h"
@@ -51,7 +52,6 @@ typedef struct XevdContext {
 
     // If end of stream occurs it is required "flushing" (aka draining) the codec,
     // as the codec might buffer multiple frames or packets internally.
-    int draining_mode; // The flag is set if codec enters draining mode.
 
     AVPacket *pkt;     // access unit (a set of NAL units that are consecutive in decoding order and containing exactly one encoded image)
 } XevdContext;
@@ -235,7 +235,6 @@ static av_cold int libxevd_init(AVCodecContext *avctx)
         return AVERROR_EXTERNAL;
     }
 
-    xectx->draining_mode = 0;
     xectx->pkt = av_packet_alloc();
     if (!xectx->pkt) {
         av_log(avctx, AV_LOG_ERROR, "Cannot allocate memory for AVPacket\n");
@@ -246,7 +245,7 @@ static av_cold int libxevd_init(AVCodecContext *avctx)
 }
 
 static int libxevd_return_frame(AVCodecContext *avctx, AVFrame *frame,
-                                XEVD_IMGB *imgb, AVPacket **pkt_au)
+                                XEVD_IMGB *imgb)
 {
     AVPacket *pkt_au_imgb = (AVPacket*)imgb->pdata[0];
     int ret;
@@ -254,8 +253,6 @@ static int libxevd_return_frame(AVCodecContext *avctx, AVFrame *frame,
     if (!pkt_au_imgb) {
         av_log(avctx, AV_LOG_ERROR, "Invalid data needed to fill frame properties\n");
 
-        if (pkt_au)
-            av_packet_free(pkt_au);
         av_frame_unref(frame);
 
         imgb->release(imgb);
@@ -295,7 +292,8 @@ static int libxevd_return_frame(AVCodecContext *avctx, AVFrame *frame,
     frame->pkt_dts = imgb->ts[XEVD_TS_DTS];
     frame->pts = imgb->ts[XEVD_TS_PTS];
 
-    av_packet_free(&pkt_au_imgb);
+    av_packet_free((AVPacket**)&imgb->pdata[0]);
+    av_freep(&imgb->pdata[1]);
 
     // xevd_pull uses pool of objects of type XEVD_IMGB.
     // The pool size is equal MAX_PB_SIZE (26), so release object when it is no more needed
@@ -327,14 +325,11 @@ static int libxevd_receive_frame(AVCodecContext *avctx, AVFrame *frame)
         av_packet_unref(pkt);
 
         return ret;
-    } else if(ret == AVERROR_EOF && xectx->draining_mode == 0) { // End of stream situations. Enter draining mode
-
-        xectx->draining_mode = 1;
-        av_packet_unref(pkt);
     }
 
     if (pkt->size > 0) {
         int bs_read_pos = 0;
+        int pkt_au_retained = 0;
         XEVD_STAT stat;
         XEVD_BITB bitb;
         int nalu_size;
@@ -352,37 +347,41 @@ static int libxevd_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             memset(&stat, 0, sizeof(XEVD_STAT));
 
             nalu_size = read_nal_unit_length(pkt_au->data + bs_read_pos, XEVD_NAL_UNIT_LENGTH_BYTE, avctx);
-            if (nalu_size == 0) {
+            if (nalu_size <= 0 || nalu_size > pkt_au->size - bs_read_pos - XEVD_NAL_UNIT_LENGTH_BYTE) {
                 av_log(avctx, AV_LOG_ERROR, "Invalid bitstream\n");
-                av_packet_free(&pkt_au);
                 ret = AVERROR_INVALIDDATA;
-
-                return ret;
+                goto fail;
             }
             bs_read_pos += XEVD_NAL_UNIT_LENGTH_BYTE;
 
             bitb.addr = pkt_au->data + bs_read_pos;
             bitb.ssize = nalu_size;
             bitb.pdata[0] = pkt_au;
+            bitb.pdata[1] = av_mallocz(sizeof(stat.stype));
             bitb.ts[XEVD_TS_DTS] = pkt_au->dts;
+
+            if (!bitb.pdata[1]) {
+                ret = AVERROR(ENOMEM);
+                goto fail;
+            }
 
             /* main decoding block */
             xevd_ret = xevd_decode(xectx->id, &bitb, &stat);
             if (XEVD_FAILED(xevd_ret)) {
                 av_log(avctx, AV_LOG_ERROR, "Failed to decode bitstream\n");
-                av_packet_free(&pkt_au);
-
-                return AVERROR_EXTERNAL;
+                av_freep(&bitb.pdata[1]);
+                ret = AVERROR_EXTERNAL;
+                goto fail;
             }
 
             bs_read_pos += nalu_size;
+            if (stat.fnum < 0)
+                av_freep(&bitb.pdata[1]);
 
             if (stat.nalu_type == XEVD_NUT_SPS) { // EVC stream parameters changed
                 if ((ret = export_stream_params(xectx, avctx)) != 0) {
                     av_log(avctx, AV_LOG_ERROR, "Failed to export stream params\n");
-                    av_packet_free(&pkt_au);
-
-                    return ret;
+                    goto fail;
                 }
             }
 
@@ -391,15 +390,16 @@ static int libxevd_receive_frame(AVCodecContext *avctx, AVFrame *frame)
 
             // stat.fnum - has negative value if the decoded data is not frame
             if (stat.fnum >= 0) {
+                pkt_au_retained = 1;
+                // store stat.stype into the bitb.pdata[1] that will be retrieved in an image
+                *(int*)bitb.pdata[1] = stat.stype;
 
                 xevd_ret = xevd_pull(xectx->id, &imgb); // The function returns a valid image only if the return code is XEVD_OK
 
                 if (XEVD_FAILED(xevd_ret)) {
                     av_log(avctx, AV_LOG_ERROR, "Failed to pull the decoded image (xevd error code: %d, frame#=%d)\n", xevd_ret, stat.fnum);
-
-                    av_packet_free(&pkt_au);
-
-                    return AVERROR_EXTERNAL;
+                    ret = AVERROR_EXTERNAL;
+                    goto fail;
                 } else if (xevd_ret == XEVD_OK_FRM_DELAYED) {
                     if(bs_read_pos == pkt_au->size) {
                         return AVERROR(EAGAIN);
@@ -408,44 +408,53 @@ static int libxevd_receive_frame(AVCodecContext *avctx, AVFrame *frame)
                     if (!imgb) {
                         if(bs_read_pos == pkt_au->size) {
                             av_log(avctx, AV_LOG_ERROR, "Invalid decoded image data\n");
-
-                            av_packet_free(&pkt_au);
                             return  AVERROR(EAGAIN);
                         }
                     } else {
-                        if (stat.stype == XEVD_ST_I) {
+                        if (*(int*)imgb->pdata[1] == XEVD_ST_I) {
                             frame->pict_type = AV_PICTURE_TYPE_I;
                             frame->flags |= AV_FRAME_FLAG_KEY;
                         }
-                        return libxevd_return_frame(avctx, frame, imgb, &pkt_au);
+                        return libxevd_return_frame(avctx, frame, imgb);
                     }
                 }
             }
         }
+        ret = AVERROR(EAGAIN);
+fail:
+        if (!pkt_au_retained)
+            av_packet_free(&pkt_au);
+        return ret;
     } else { // decoder draining mode handling
 
-        xevd_ret = xevd_pull(xectx->id, &imgb);
+        while (1) {
+            xevd_ret = xevd_pull(xectx->id, &imgb);
 
-        if (xevd_ret == XEVD_ERR_UNEXPECTED) { // draining process completed
-            av_log(avctx, AV_LOG_DEBUG, "Draining process completed\n");
+            if (xevd_ret == XEVD_ERR_UNEXPECTED) { // draining process completed
+                av_log(avctx, AV_LOG_DEBUG, "Draining process completed\n");
 
-            return AVERROR_EOF;
-        } else if (XEVD_FAILED(xevd_ret)) { // handle all other errors
-            av_log(avctx, AV_LOG_ERROR, "Failed to pull the decoded image (xevd error code: %d)\n", xevd_ret);
-
-            return AVERROR_EXTERNAL;
-        } else { // XEVD_OK
-            if (!imgb) {
-                av_log(avctx, AV_LOG_ERROR, "Invalid decoded image data\n");
+                return AVERROR_EOF;
+            } else if (XEVD_FAILED(xevd_ret)) { // handle all other errors
+                av_log(avctx, AV_LOG_ERROR, "Failed to pull the decoded image (xevd error code: %d)\n", xevd_ret);
 
                 return AVERROR_EXTERNAL;
-            }
+            } else if (xevd_ret == XEVD_OK) {
+                if (!imgb) {
+                    av_log(avctx, AV_LOG_ERROR, "Invalid decoded image data\n");
 
-            return libxevd_return_frame(avctx, frame, imgb, NULL);
+                    continue;
+                }
+
+                if (*(int*)imgb->pdata[1] == XEVD_ST_I) {
+                    frame->pict_type = AV_PICTURE_TYPE_I;
+                    frame->flags |= AV_FRAME_FLAG_KEY;
+                }
+                return libxevd_return_frame(avctx, frame, imgb);
+            }
+            av_log(avctx, AV_LOG_WARNING, "Unexpected return code while draining (xevd error code: %d)\n", xevd_ret);
+            return AVERROR_EOF;
         }
     }
-
-    return ret;
 }
 
 /**
@@ -462,14 +471,13 @@ static av_cold int libxevd_close(AVCodecContext *avctx)
         xectx->id = NULL;
     }
 
-    xectx->draining_mode = 0;
     av_packet_free(&xectx->pkt);
 
     return 0;
 }
 
 const FFCodec ff_libxevd_decoder = {
-    .p.name             = "evc",
+    .p.name             = "libxevd",
     CODEC_LONG_NAME("EVC / MPEG-5 Essential Video Coding (EVC)"),
     .p.type             = AVMEDIA_TYPE_VIDEO,
     .p.id               = AV_CODEC_ID_EVC,
