@@ -475,5 +475,5 @@ stream 1
 1, dts 236544, pts 236544, duration 1024, flags 0x1, size 69, pos 36661, adler 0xa11b2333
 1, dts 237568, pts 237568, duration 1024, flags 0x1, size 69, pos 36730, adler 0xaec62347
 1, dts 238592, pts 238592, duration 1024, flags 0x1, size 569, pos 36850, adler 0x1154fc00
-1, dts 239616, pts 239616, duration 1024, flags 0x1, size 314, pos 37419, adler 0xcd359ccc, side 11 size 10 adler 0x00600010
+1, dts 239616, pts 239616, duration 1024, flags 0x1, size 314, pos 37419, adler 0xcd359ccc
 end 1: eof

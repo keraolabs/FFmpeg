@@ -143,5 +143,5 @@ stream 1
 1, dts 92160, pts 92160, duration 1024, flags 0x1, size 66, pos 14286, adler 0x1fb31e3e, side 25 size 56 adler 0x19d209f9
 1, dts 93184, pts 93184, duration 1024, flags 0x1, size 73, pos 14352, adler 0xefcd2949, side 25 size 56 adler 0x19db09fa
 1, dts 94208, pts 94208, duration 1024, flags 0x1, size 440, pos 14505, adler 0xb451e5af, side 25 size 56 adler 0x19e409fb
-1, dts 95232, pts 95232, duration 1024, flags 0x1, size 284, pos 14945, adler 0xae3f89b3, side 25 size 56 adler 0x19ed09fc, side 11 size 10 adler 0x00600010
+1, dts 95232, pts 95232, duration 1024, flags 0x1, size 284, pos 14945, adler 0xae3f89b3, side 25 size 56 adler 0x19ed09fc
 end 1: eof

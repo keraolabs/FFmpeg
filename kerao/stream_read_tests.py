@@ -51,8 +51,8 @@ MAK = ROOT / "tests" / "fate" / "libavformat.mak"
 PROVENANCE = ROOT / "kerao" / "stream_read_refs.txt"
 TEST_PROGRAM = ROOT / "libavformat" / "tests" / "stream_read.c"
 
-BASELINE_COMMIT = "ae49c6ac4a2409553ca0f9a00f9e252cbce632a0"
-BASELINE_TREE = "b4a2cbf458f4728c4cf3abb745ed97c625a87732"
+BASELINE_COMMIT = "74e4393595cf2b5857f0da925c4e0dd74ea306e5"
+BASELINE_TREE = "eed36c7cb77a542a4dcbda4805fafeec0ade05e7"
 CONFIGURE = [
     "--disable-autodetect", "--disable-programs", "--disable-doc", "--disable-avdevice",
     "--disable-avfilter", "--disable-swscale", "--enable-pthreads", "--disable-network",
